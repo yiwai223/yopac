@@ -448,7 +448,6 @@ export default function YopacAppPage() {
       const urlParams = new URLSearchParams(window.location.search)
       const isAdminUser = user.email?.toLowerCase() === ADMIN_EMAIL
       const isViewer = !isAdminUser || urlParams.get('view') === 'viewer'
-      const isViewer = urlParams.get('view') === 'viewer'
       const role = isViewer ? 'viewer' : 'admin'
 
       const entities = ['books', 'people', 'works', 'publishers']

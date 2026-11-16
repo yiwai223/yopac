@@ -3532,15 +3532,18 @@ export default function YopacAppPage() {
       const nav = document.getElementById('main-nav')
       if (nav) {
         if (role === 'viewer') {
-          nav.innerHTML = `<a href="#books">所蔵リスト</a><a href="${window.location.pathname}">管理者画面に戻る</a>`
+          const backToAdminLink = isAdminUser
+            ? `<a href="${window.location.pathname}">管理者画面に戻る</a>`
+            : ''
+          nav.innerHTML = `<a href="#books">所蔵リスト</a>${backToAdminLink}<button type="button" class="nav-btn" id="logout-btn">ログアウト</button>`
         } else {
           nav.innerHTML = `<a href="#books">所蔵リスト</a><a href="#people">個人・団体</a><a href="#works">作品</a><a href="#publishers">出版者・レーベル</a><a href="#settings">管理</a><a href="${window.location.pathname}?view=viewer">利用者画面を確認</a><button type="button" class="nav-btn" id="logout-btn">ログアウト</button>`
-          const logoutBtn = document.getElementById('logout-btn')
-          if (logoutBtn) {
-            logoutBtn.onclick = async () => {
-              await supabase.auth.signOut()
-              router.push('/login')
-            }
+        }
+        const logoutBtn = document.getElementById('logout-btn')
+        if (logoutBtn) {
+          logoutBtn.onclick = async () => {
+            await supabase.auth.signOut()
+            router.push('/login')
           }
         }
       }

@@ -444,7 +444,10 @@ export default function YopacAppPage() {
       let saveRunning = false
       let saveBlocked = false
 
+      const ADMIN_EMAIL = 'yiwai223@gmail.com'
       const urlParams = new URLSearchParams(window.location.search)
+      const isAdminUser = user.email?.toLowerCase() === ADMIN_EMAIL
+      const isViewer = !isAdminUser || urlParams.get('view') === 'viewer'
       const isViewer = urlParams.get('view') === 'viewer'
       const role = isViewer ? 'viewer' : 'admin'
 

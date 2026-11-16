@@ -519,16 +519,18 @@ export default function YopacAppPage() {
                 classification: value.classification || '',
                 status: value.status || '所蔵',
                 isbn: value.isbn || '',
-                price: String(value.price ?? ''),
-                purchase_price: String(value.purchasePrice ?? ''),
+                price: value.price === '' || value.price == null ? null : Number(value.price),
+                purchase_price:
+                  value.purchasePrice === '' || value.purchasePrice == null
+                    ? null
+                    : Number(value.purchasePrice),
                 created_at: value.registered || new Date().toISOString(),
                 modified_at: value.modified || new Date().toISOString(),
                 people_json: JSON.stringify(value.people || []),
                 works_json: JSON.stringify(value.works || []),
                 related_json: JSON.stringify(value.related || []),
-                rating: String(value.rating ?? ''),
-                review: value.review || '',
-                memo: value.memo || '',
+                rating: value.rating === '' || value.rating == null ? null : Number(value.rating),
+                review: value.review || '',                memo: value.memo || '',
                 cover: value.cover || '',
                 cover_assets_json: JSON.stringify(value.coverAssets || []),
                 raw_json: JSON.stringify(value),

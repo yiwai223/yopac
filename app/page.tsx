@@ -846,7 +846,7 @@ export default function YopacAppPage() {
       const fmt = (d: string) => (d ? new Date(d).toLocaleString('ja-JP') : '—')
       const money = (v: any) =>
         v === '' || v == null || isNaN(Number(v)) ? '—' : Number(v).toLocaleString('ja-JP') + '円'
-      const normal = (v: any) => String(v ?? '').normalize('NFKC').toLowerCase().trim()
+      const normal = (v: any) => String(v ?? '').normalize('NFKC').toLowerCase().replace(/[\s ]+/g, '').trim()
       const isbnClean = (s: any) =>
         String(s ?? '')
           .normalize('NFKC')

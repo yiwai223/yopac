@@ -3362,100 +3362,160 @@ $$('[data-move-member-up]').forEach(
         return [...new Set(structured.length ? structured : fallback)]
       }
 
-      // OpenBD + NDL 連携で書誌情報（分類番号・価格・シリーズ・巻号・副題・書影）を一括取得
+// OpenBD / Google Books 優先 ＋ NDL フォールバックで書誌情報を一括取得
       async function lookupBook(isbn: string, draft: any, redraw: any) {
         isbn = isbnClean(isbn)
         if (!validISBN(isbn)) return notify('有効なISBNを入力してください')
-        openModal('<h2>NDL / OpenBD から書誌情報を取得</h2><p data-ndl-loading>検索中…</p>')
+        openModal('<h2>書誌情報を取得</h2><p data-ndl-loading>OpenBD / Google Books / NDL から検索中…</p>')
         const loading = modalBody.querySelector('[data-ndl-loading]')
         const isCurrent = () => modal.open && modalBody.contains(loading)
+
+        const candidates: any[] = []
+        let ndlErrorMsg = ''
+
         try {
-          let openBdCover = ''
-          let openBdPrice = ''
-          let openBdSeries = ''
-          let openBdVolume = ''
-          let openBdSubtitle = ''
+          // 1. OpenBD API（日本の書籍の多くをカバー・レート制限なし・超高速）
           try {
             const obdRes = await fetch(`https://api.openbd.jp/v1/get?isbn=${isbn}`)
             if (obdRes.ok) {
               const obdJson = await obdRes.json()
               const item = obdJson?.[0]
-              openBdCover = item?.summary?.cover || ''
-              openBdSeries = item?.summary?.series || ''
-              openBdVolume = item?.summary?.volume || ''
-              const onix = item?.onix
-              openBdSubtitle =
-                onix?.DescriptiveDetail?.TitleDetail?.TitleElement?.Subtitle?.content || ''
-              const prices = onix?.ProductSupply?.SupplyDetail?.Price || []
-              const jpy = prices.find((p: any) => p.CurrencyCode === 'JPY') || prices[0]
-              if (jpy?.PriceAmount) {
-                openBdPrice = String(jpy.PriceAmount).replace(/[^\d]/g, '')
+              if (item && item.summary?.title) {
+                const onix = item.onix
+                const subtitle =
+                  onix?.DescriptiveDetail?.TitleDetail?.TitleElement?.Subtitle?.content || ''
+                const prices = onix?.ProductSupply?.SupplyDetail?.Price || []
+                const jpy = prices.find((p: any) => p.CurrencyCode === 'JPY') || prices[0]
+                const price = jpy?.PriceAmount ? String(jpy.PriceAmount).replace(/[^\d]/g, '') : ''
+
+                // ONIX内のNDC分類コード抽出
+                const subjects = onix?.DescriptiveDetail?.Subject || []
+                const ndcSubj = subjects.find((s: any) => s.SubjectSchemeIdentifier === '78')
+                const classification = ndcSubj?.SubjectCode || ''
+
+                // 著者名の整形（「東野, 圭吾」→「東野 圭吾」）
+                const rawAuthors = item.summary.author
+                  ? String(item.summary.author)
+                      .split(/[／/]/)
+                      .map((a: string) => a.replace(/,\s*/g, ' ').replace(/\s*\(.+?\)/g, '').trim())
+                      .filter(Boolean)
+                  : []
+
+                candidates.push({
+                  sourceLabel: 'OpenBD',
+                  title: item.summary.title || '',
+                  subtitle,
+                  series: item.summary.series || '',
+                  volume: item.summary.volume || '',
+                  publisher: item.summary.publisher || '',
+                  authors: rawAuthors,
+                  classification,
+                  price,
+                  cover: item.summary.cover || '',
+                  isbn,
+                })
               }
             }
           } catch {}
 
-          const query = 'isbn="' + isbn + '"'
-          const url =
-            'https://ndlsearch.ndl.go.jp/api/sru?operation=searchRetrieve&version=1.2&recordSchema=dcndl&recordPacking=xml&maximumRecords=10&query=' +
-            encodeURIComponent(query)
-          const xml = await loadXML(url)
-          if (!isCurrent()) return
-          const data = [...xml.getElementsByTagNameNS('*', 'recordData')]
-          if (!data.length) throw Error('NDLで候補が見つかりませんでした')
-
-          const candidates = data.map((n) => {
-            // NDC（分類番号）の抽出
-            const subjects = [...n.getElementsByTagNameNS('http://purl.org/dc/terms/', 'subject')]
-            let ndc = ''
-            for (const s of subjects) {
-              const resAttr =
-                s.getAttributeNS('http://www.w3.org/1999/02/22-rdf-syntax-ns#', 'resource') ||
-                s.getAttribute('rdf:resource') ||
-                ''
-              const m = resAttr.match(/ndc(?:9|10)?\/([0-9A-Za-z.]+)/i)
-              if (m) {
-                ndc = m[1]
-                break
+          // 2. Google Books API（OpenBDにない本や洋書もカバー）
+          if (candidates.length === 0) {
+            try {
+              const gbRes = await fetch(
+                `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`
+              )
+              if (gbRes.ok) {
+                const gbJson = await gbRes.json()
+                const vol = gbJson?.items?.[0]?.volumeInfo
+                if (vol && vol.title) {
+                  candidates.push({
+                    sourceLabel: 'Google Books',
+                    title: vol.title || '',
+                    subtitle: vol.subtitle || '',
+                    series: '',
+                    volume: '',
+                    publisher: vol.publisher || '',
+                    authors: Array.isArray(vol.authors) ? vol.authors : [],
+                    classification: '',
+                    price: '',
+                    cover: vol.imageLinks?.thumbnail?.replace(/^http:/, 'https:') || '',
+                    isbn,
+                  })
+                }
               }
-            }
-            if (!ndc) {
-              const rawSubj = tagValues(n, 'subject').find((v) => /^\d{3}(?:\.\d+)?$/.test(v))
-              if (rawSubj) ndc = rawSubj
-            }
+            } catch {}
+          }
 
-            // 価格の抽出（例: "1800円" -> "1800"）
-            const rawPriceText = tagValues(n, 'price')[0] || ''
-            const priceMatch = rawPriceText.replace(/,/g, '').match(/(\d+)/)
-            const ndlPrice = priceMatch ? priceMatch[1] : ''
+          // 3. OpenBD / Google Books で見つからない場合のみ NDL API に問い合わせる
+          if (candidates.length === 0) {
+            try {
+              const query = 'isbn="' + isbn + '"'
+              const url =
+                'https://ndlsearch.ndl.go.jp/api/sru?operation=searchRetrieve&version=1.2&recordSchema=dcndl&recordPacking=xml&maximumRecords=5&query=' +
+                encodeURIComponent(query)
+              const xml = await loadXML(url)
+              const data = [...xml.getElementsByTagNameNS('*', 'recordData')]
+              for (const n of data) {
+                const subjects = [...n.getElementsByTagNameNS('http://purl.org/dc/terms/', 'subject')]
+                let ndc = ''
+                for (const s of subjects) {
+                  const resAttr =
+                    s.getAttributeNS('http://www.w3.org/1999/02/22-rdf-syntax-ns#', 'resource') ||
+                    s.getAttribute('rdf:resource') ||
+                    ''
+                  const m = resAttr.match(/ndc(?:9|10)?\/([0-9A-Za-z.]+)/i)
+                  if (m) {
+                    ndc = m[1]
+                    break
+                  }
+                }
+                if (!ndc) {
+                  const rawSubj = tagValues(n, 'subject').find((v) => /^\d{3}(?:\.\d+)?$/.test(v))
+                  if (rawSubj) ndc = rawSubj
+                }
+                const rawPriceText = tagValues(n, 'price')[0] || ''
+                const priceMatch = rawPriceText.replace(/,/g, '').match(/(\d+)/)
+                const ndlPrice = priceMatch ? priceMatch[1] : ''
 
-            // シリーズ・巻号・副題の抽出
-            const seriesTitle = tagValues(n, 'seriesTitle')[0] || openBdSeries
-            const volume = tagValues(n, 'volume')[0] || openBdVolume
-            const subtitle = tagValues(n, 'alternative')[0] || openBdSubtitle
-
-            return {
-              title: tagValues(n, 'title')[0] || '',
-              subtitle,
-              series: seriesTitle,
-              volume,
-              publisher: ndlAgentNames(n, 'publisher')[0] || '',
-              authors: ndlAgentNames(n, 'creator'),
-              classification: ndc,
-              price: ndlPrice || openBdPrice,
-              source: tagValues(n, 'seeAlso')[0] || '',
-              isbn,
+                candidates.push({
+                  sourceLabel: 'NDL（国立国会図書館）',
+                  title: tagValues(n, 'title')[0] || '',
+                  subtitle: tagValues(n, 'alternative')[0] || '',
+                  series: tagValues(n, 'seriesTitle')[0] || '',
+                  volume: tagValues(n, 'volume')[0] || '',
+                  publisher: ndlAgentNames(n, 'publisher')[0] || '',
+                  authors: ndlAgentNames(n, 'creator'),
+                  classification: ndc,
+                  price: ndlPrice,
+                  cover: '',
+                  isbn,
+                })
+              }
+            } catch (err: any) {
+              ndlErrorMsg = err?.message || String(err)
             }
-          })
+          }
+
+          if (!isCurrent()) return
+          if (!candidates.length) {
+            throw Error(
+              ndlErrorMsg
+                ? `OpenBD・Google Booksに未登録で、NDL側も混み合っています（${ndlErrorMsg}）`
+                : '該当する書誌情報が見つかりませんでした'
+            )
+          }
 
           openModal(
-            `<h2>NDLの候補を確認</h2><p class="muted">書名・分類・価格・シリーズ・出版社・著者・書影を取り込みます。</p>${candidates
+            `<h2>書誌候補を確認</h2><p class="muted">書名・分類・価格・シリーズ・出版社・著者・書影を取り込みます。</p>${candidates
               .map(
                 (c, i) =>
-                  `<section class="panel"><h3>${esc(c.title)}${
-                    c.volume ? ' ' + esc(c.volume) : ''
-                  }</h3><p>${esc(c.publisher)}${
-                    c.classification ? ` / 分類: ${esc(c.classification)}` : ''
-                  }${c.price ? ` / 価格: ${esc(c.price)}円` : ''}</p><p>${esc(
+                  `<section class="panel"><div class="muted" style="margin-bottom:4px">取得元: ${esc(
+                    c.sourceLabel
+                  )}</div><h3>${esc(c.title)}${c.volume ? ' ' + esc(c.volume) : ''}</h3><p>${esc(
+                    c.publisher
+                  )}${c.classification ? ` / 分類: ${esc(c.classification)}` : ''}${
+                    c.price ? ` / 価格: ${esc(c.price)}円` : ''
+                  }</p><p>${esc(
                     c.authors.join(' / ')
                   )}</p><button type="button" class="primary" data-ndl-candidate="${i}">この候補を取り込む</button></section>`
               )
@@ -3476,7 +3536,7 @@ $$('[data-move-member-up]').forEach(
                 if (!draft.cover) {
                   const i13 = toIsbn13(isbn)
                   draft.cover =
-                    openBdCover || (i13 ? `https://ndlsearch.ndl.go.jp/thumbnail/${i13}.jpg` : '')
+                    c.cover || (i13 ? `https://ndlsearch.ndl.go.jp/thumbnail/${i13}.jpg` : '')
                 }
                 if (c.publisher) {
                   let p = db.publishers.find(
@@ -3515,7 +3575,7 @@ $$('[data-move-member-up]').forEach(
         } catch (e: any) {
           if (!isCurrent()) return
           openModal(
-            `<h2>NDL取得を完了できませんでした</h2><p>${esc(
+            `<h2>書誌取得を完了できませんでした</h2><p>${esc(
               e.message
             )}</p><a class="button" href="https://ndlsearch.ndl.go.jp/search?cs=bib&keyword=${encodeURIComponent(
               isbn

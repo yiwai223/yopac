@@ -1400,9 +1400,47 @@ export default function YopacAppPage() {
         else location.hash = '#books'
       }
 
-      function classPicker() {
+function classPicker() {
         let prefix = ''
+        let nonDecimalMode = false
         function draw() {
+          if (nonDecimalMode) {
+            const others = db.classes
+              .filter((c: any) => c.code && !/^\d{3}/.test(c.code))
+              .sort((a: any, b: any) =>
+                normal(a.code).localeCompare(normal(b.code), 'ja', { numeric: true })
+              )
+            openModal(
+              `<h2>分類で所蔵リストを表示</h2><p>十進分類法（数字3桁）以外の分類</p><div class="toolbar"><button type="button" id="class-back-decimal">十進分類法に戻る</button></div><div class="inline-links">${
+                others
+                  .map(
+                    (c: any) =>
+                      `<button type="button" data-exact-class="${esc(c.code)}">${esc(
+                        c.code
+                      )} ${esc(c.name)} <span class="count">${
+                        db.books.filter(
+                          (b: any) => String(b.classification || '').trim() === c.code
+                        ).length
+                      }冊</span></button>`
+                  )
+                  .join('') || '<p class="muted">十進分類法以外の分類が登録されていません。</p>'
+              }</div>`
+            )
+            $('#class-back-decimal').onclick = () => {
+              nonDecimalMode = false
+              prefix = ''
+              draw()
+            }
+            $$('[data-exact-class]', modalBody).forEach((e) => {
+              e.onclick = () => {
+                filters.cls = e.dataset.exactClass
+                closeModal()
+                goBooks()
+              }
+            })
+            return
+          }
+
           const level = prefix.length + 1
           const codes =
             level <= 3
@@ -1414,6 +1452,8 @@ export default function YopacAppPage() {
                   ),
                 ].sort()
               : []
+          const hasNonDecimal = db.classes.some((c: any) => c.code && !/^\d{3}/.test(c.code))
+
           openModal(
             `<h2>分類で所蔵リストを表示</h2><p>${
               prefix ? `${esc(prefix)} ${esc(classLabel(prefix, prefix.length))}` : '第1次区分を選択'
@@ -1421,6 +1461,10 @@ export default function YopacAppPage() {
               prefix ? 'この分類全体を表示' : 'すべて表示'
             }</button>${
               prefix ? '<button type="button" id="class-up">上の階層へ</button>' : ''
+            }${
+              !prefix && hasNonDecimal
+                ? '<button type="button" id="choose-non-decimal" class="secondary">その他の分類（NDC以外）</button>'
+                : ''
             }</div><div class="inline-links">${codes
               .map(
                 (c: any) =>
@@ -1455,10 +1499,16 @@ export default function YopacAppPage() {
               draw()
             }
           }
+          if ($('#choose-non-decimal')) {
+            $('#choose-non-decimal').onclick = () => {
+              nonDecimalMode = true
+              draw()
+            }
+          }
         }
         draw()
       }
-
+      
       function download(name: string, text: string, type = 'application/json') {
         const url = URL.createObjectURL(new Blob([text], { type }))
         const a = document.createElement('a')
@@ -3314,7 +3364,7 @@ $$('[data-move-member-up]').forEach(
         return [...new Set(structured.length ? structured : fallback)]
       }
 
-      // OpenBD + NDL 連携で書誌情報と同時に書影URLも自動取得
+      // OpenBD + NDL 連携で書誌情報（分類番号・価格・シリーズ・巻号・副題・書影）を一括取得
       async function lookupBook(isbn: string, draft: any, redraw: any) {
         isbn = isbnClean(isbn)
         if (!validISBN(isbn)) return notify('有効なISBNを入力してください')
@@ -3323,11 +3373,26 @@ $$('[data-move-member-up]').forEach(
         const isCurrent = () => modal.open && modalBody.contains(loading)
         try {
           let openBdCover = ''
+          let openBdPrice = ''
+          let openBdSeries = ''
+          let openBdVolume = ''
+          let openBdSubtitle = ''
           try {
             const obdRes = await fetch(`https://api.openbd.jp/v1/get?isbn=${isbn}`)
             if (obdRes.ok) {
               const obdJson = await obdRes.json()
-              openBdCover = obdJson?.[0]?.summary?.cover || ''
+              const item = obdJson?.[0]
+              openBdCover = item?.summary?.cover || ''
+              openBdSeries = item?.summary?.series || ''
+              openBdVolume = item?.summary?.volume || ''
+              const onix = item?.onix
+              openBdSubtitle =
+                onix?.DescriptiveDetail?.TitleDetail?.TitleElement?.Subtitle?.content || ''
+              const prices = onix?.ProductSupply?.SupplyDetail?.Price || []
+              const jpy = prices.find((p: any) => p.CurrencyCode === 'JPY') || prices[0]
+              if (jpy?.PriceAmount) {
+                openBdPrice = String(jpy.PriceAmount).replace(/[^\d]/g, '')
+              }
             }
           } catch {}
 
@@ -3339,20 +3404,60 @@ $$('[data-move-member-up]').forEach(
           if (!isCurrent()) return
           const data = [...xml.getElementsByTagNameNS('*', 'recordData')]
           if (!data.length) throw Error('NDLで候補が見つかりませんでした')
-          const candidates = data.map((n) => ({
-            title: tagValues(n, 'title')[0] || '',
-            publisher: ndlAgentNames(n, 'publisher')[0] || '',
-            authors: ndlAgentNames(n, 'creator'),
-            source: tagValues(n, 'seeAlso')[0] || '',
-            isbn,
-          }))
+
+          const candidates = data.map((n) => {
+            // NDC（分類番号）の抽出
+            const subjects = [...n.getElementsByTagNameNS('http://purl.org/dc/terms/', 'subject')]
+            let ndc = ''
+            for (const s of subjects) {
+              const resAttr =
+                s.getAttributeNS('http://www.w3.org/1999/02/22-rdf-syntax-ns#', 'resource') ||
+                s.getAttribute('rdf:resource') ||
+                ''
+              const m = resAttr.match(/ndc(?:9|10)?\/([0-9A-Za-z.]+)/i)
+              if (m) {
+                ndc = m[1]
+                break
+              }
+            }
+            if (!ndc) {
+              const rawSubj = tagValues(n, 'subject').find((v) => /^\d{3}(?:\.\d+)?$/.test(v))
+              if (rawSubj) ndc = rawSubj
+            }
+
+            // 価格の抽出（例: "1800円" -> "1800"）
+            const rawPriceText = tagValues(n, 'price')[0] || ''
+            const priceMatch = rawPriceText.replace(/,/g, '').match(/(\d+)/)
+            const ndlPrice = priceMatch ? priceMatch[1] : ''
+
+            // シリーズ・巻号・副題の抽出
+            const seriesTitle = tagValues(n, 'seriesTitle')[0] || openBdSeries
+            const volume = tagValues(n, 'volume')[0] || openBdVolume
+            const subtitle = tagValues(n, 'alternative')[0] || openBdSubtitle
+
+            return {
+              title: tagValues(n, 'title')[0] || '',
+              subtitle,
+              series: seriesTitle,
+              volume,
+              publisher: ndlAgentNames(n, 'publisher')[0] || '',
+              authors: ndlAgentNames(n, 'creator'),
+              classification: ndc,
+              price: ndlPrice || openBdPrice,
+              source: tagValues(n, 'seeAlso')[0] || '',
+              isbn,
+            }
+          })
+
           openModal(
-            `<h2>NDLの候補を確認</h2><p class="muted">書名・ISBN・出版社・著者・書影を取り込みます。</p>${candidates
+            `<h2>NDLの候補を確認</h2><p class="muted">書名・分類・価格・シリーズ・出版社・著者・書影を取り込みます。</p>${candidates
               .map(
                 (c, i) =>
-                  `<section class="panel"><h3>${esc(c.title)}</h3><p>${esc(
-                    c.publisher
-                  )}</p><p>${esc(
+                  `<section class="panel"><h3>${esc(c.title)}${
+                    c.volume ? ' ' + esc(c.volume) : ''
+                  }</h3><p>${esc(c.publisher)}${
+                    c.classification ? ` / 分類: ${esc(c.classification)}` : ''
+                  }${c.price ? ` / 価格: ${esc(c.price)}円` : ''}</p><p>${esc(
                     c.authors.join(' / ')
                   )}</p><button type="button" class="primary" data-ndl-candidate="${i}">この候補を取り込む</button></section>`
               )
@@ -3363,6 +3468,12 @@ $$('[data-move-member-up]').forEach(
               (e.onclick = () => {
                 const c = candidates[Number(e.dataset.ndlCandidate)]
                 draft.title = c.title
+                if (c.subtitle && !draft.subtitle) draft.subtitle = c.subtitle
+                if (c.series && !draft.series) draft.series = c.series
+                if (c.volume && !draft.volume) draft.volume = c.volume
+                if (c.classification && !draft.classification)
+                  draft.classification = c.classification
+                if (c.price && !draft.price) draft.price = c.price
                 draft.isbn = isbn
                 if (!draft.cover) {
                   const i13 = toIsbn13(isbn)
@@ -3414,7 +3525,7 @@ $$('[data-move-member-up]').forEach(
           )
         }
       }
-
+      
       async function lookupAuthorityById(draft: any, redraw: any, provided?: string) {
         const n =
           provided ??

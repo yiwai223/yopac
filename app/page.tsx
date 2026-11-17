@@ -1608,6 +1608,20 @@ export default function YopacAppPage() {
         }
       }
 
+ function duplicateBook(source: any) {
+        const copy = structuredClone(source)
+        delete copy._dbId
+        copy.id = id()
+        copy.favorite = false
+        copy.cover = ''
+        copy.coverAvailable = false
+        copy.coverAssets = []
+        copy.registered = new Date().toISOString()
+        copy.modified = new Date().toISOString()
+        editBook(copy)
+        notify('データを複製しました。巻号やISBNなどを修正して「保存」を押してください')
+      }
+
       function bookDetail(b: any) {
         app.innerHTML = `<div class="breadcrumb"><a href="#books">所蔵リスト</a> › 書籍詳細</div><div class="page-head"><h1>${
           esc(b.title) || '（書名未入力）'
@@ -1615,7 +1629,7 @@ export default function YopacAppPage() {
           b.favorite ? '★' : '☆'
         }</button> <a class="button primary" href="#edit-book/${
           b.id
-        }">編集</a> <button type="button" class="danger" data-delete-book="${esc(
+        }">編集</a> <button type="button" id="duplicate-book">複製</button> <button type="button" class="danger" data-delete-book="${esc(
           b.id
         )}">削除</button></div></div><div class="detail-grid"><section class="fields">${detailField(
           '書影',
@@ -1682,6 +1696,7 @@ export default function YopacAppPage() {
           persist()
           bookDetail(b)
         }
+        $('#duplicate-book').onclick = () => duplicateBook(b)
         $('#quick-status').onchange = (e: any) => {
           b.status = e.target.value
           b.modified = new Date().toISOString()
@@ -2162,13 +2177,22 @@ export default function YopacAppPage() {
         draw()
       }
 
-      function membersEditor(m: any[]) {
-        return `<div id="members">${(m || [])
+function membersEditor(m: any[]) {
+        const list = m || []
+        return `<div id="members">${list
           .map(
             (p, i) =>
               `<div class="member" data-member="${i}"><input type="hidden" data-person value="${esc(
                 p.id
-              )}"><span class="member-person"><a href="#person/${esc(p.id)}">${esc(
+              )}">${
+                list.length > 1
+                  ? `<span class="inline-links" style="gap:4px"><button type="button" class="tiny" data-move-member-up="${i}" aria-label="上へ移動" ${
+                      i === 0 ? 'disabled' : ''
+                    }>↑</button><button type="button" class="tiny" data-move-member-down="${i}" aria-label="下へ移動" ${
+                      i === list.length - 1 ? 'disabled' : ''
+                    }>↓</button></span>`
+                  : ''
+              }<span class="member-person"><a href="#person/${esc(p.id)}">${esc(
                 person(p.id)?.name || p.printed || '未設定'
               )}</a><button type="button" class="tiny" data-change-person="${i}">人物を検索して変更</button></span>${db.roles
                 .map(
@@ -2187,7 +2211,7 @@ export default function YopacAppPage() {
             ''
           )}</div><div class="toolbar" style="margin-top:10px"><button type="button" id="add-member">＋ 登録済みの人物・団体</button><button type="button" id="new-member">＋ 人物・団体を新規登録</button></div>`
       }
-
+      
       function readMembers() {
         return $$('[data-member]').map((row) => ({
           id: $('[data-person]', row).value,
@@ -2234,6 +2258,28 @@ export default function YopacAppPage() {
               )
             })
         )
+$$('[data-move-member-up]').forEach(
+          (e) =>
+            (e.onclick = () => {
+              draft.people = readMembers()
+              const i = Number(e.dataset.moveMemberUp)
+              if (i > 0) {
+                ;[draft.people[i - 1], draft.people[i]] = [draft.people[i], draft.people[i - 1]]
+                redraw()
+              }
+            })
+        )
+        $$('[data-move-member-down]').forEach(
+          (e) =>
+            (e.onclick = () => {
+              draft.people = readMembers()
+              const i = Number(e.dataset.moveMemberDown)
+              if (i < draft.people.length - 1) {
+                ;[draft.people[i], draft.people[i + 1]] = [draft.people[i + 1], draft.people[i]]
+                redraw()
+              }
+            })
+        )
         $$('[data-remove-member]').forEach(
           (e) =>
             (e.onclick = () => {
@@ -2243,7 +2289,7 @@ export default function YopacAppPage() {
             })
         )
       }
-
+      
       let bookDraft: any = null
       function editBook(source: any) {
         bookDraft = structuredClone(

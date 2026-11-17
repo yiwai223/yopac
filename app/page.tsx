@@ -3325,13 +3325,11 @@ $$('[data-move-member-up]').forEach(
       }
 
       async function fetchNdlViaProxy(targetUrl: string) {
-        const res = await fetch(
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
-        )
+        const res = await fetch(`/api/ndl?url=${encodeURIComponent(targetUrl)}`)
         if (!res.ok) throw Error('NDL応答：HTTP ' + res.status)
         return await res.text()
       }
-
+      
       async function loadXML(url: string) {
         const text = await fetchNdlViaProxy(url)
         const xml = new DOMParser().parseFromString(text, 'application/xml')
@@ -3396,7 +3394,7 @@ $$('[data-move-member-up]').forEach(
             }
           } catch {}
 
-          const query = 'isbn="' + isbn + '" AND dpid="iss-ndl-opac"'
+          const query = 'isbn="' + isbn + '"'
           const url =
             'https://ndlsearch.ndl.go.jp/api/sru?operation=searchRetrieve&version=1.2&recordSchema=dcndl&recordPacking=xml&maximumRecords=10&query=' +
             encodeURIComponent(query)

@@ -1964,8 +1964,106 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
           .filter(Boolean)
 
         openModal(
+          `<h2>収録作品を一括登録</h2>
+          <p class="muted">1行に1作品ずつ入力してください。基本は作品名のみでOKです。著者や形式が作品ごとに異なる場合は <code>/</code>（スラッシュ）で区切って指定できます。</p>
+          <div class="section-note" style="margin:10px 0">
+            <strong>入力例：</strong><br>
+            羅生門<br>
+            鼻 / 芥川 龍之介<br>
+            解説 / 中村 真一郎 / 解説
+          </div>
+          <div class="form-grid" style="margin-bottom:12px">
+            <label>デフォルトの形式
+              <select id="bulk-default-format">
+                <option value="">未設定</option>
+                ${opts(formatValues, '')}
+              </select>
+            </label>
+            <div class="field-box">
+              <div class="label">デフォルトの著者</div>
+              <label class="role-check" style="margin-top:6px">
+                <input type="checkbox" id="bulk-inherit-authors" ${
+                  bookAuthors.length ? 'checked' : ''
+                }>
+                この書籍の著者を自動で引き継ぐ${
+                  bookAuthors.length
+                    ? `（${esc(bookAuthors.map((p: any) => p.name).join('・'))}）`
+                    : '（書籍に著者未設定）'
+                }
+              </label>
+            </div>
+          </div>
+          <label style="display:block;font-weight:600;margin-bottom:6px">作品リスト（1行に1作品）
+            <textarea id="bulk-works-text" rows="9" placeholder="作品名&#10;作品名 / 著者名&#10;作品名 / 著者名 / 形式"></textarea>
+          </label>
+          <div class="toolbar" style="margin-top:12px">
+            <button type="button" id="bulk-preview-btn" class="primary">内容を確認する（プレビュー）</button>
+            <button type="button" id="bulk-cancel-btn">キャンセル</button>
+          </div>`
+        )
+
+        $('#bulk-cancel-btn', modalBody).onclick = closeModal
+
+        $('#bulk-preview-btn', modalBody).onclick = () => {
+          const rawText = $('#bulk-works-text', modalBody).value || ''
+          const lines = rawText
+            .split(/\r?\n/)
+            .map((l: string) => l.trim())
+            .filter(Boolean)
+          if (!lines.length) return notify('作品名を1行以上入力してください')
+
+          const defaultFormat = $('#bulk-default-format', modalBody).value
+          const inheritAuthors = $('#bulk-inherit-authors', modalBody).checked
+
+          const parsedRows = lines.map((line: string) => {
+            const parts = line.split(/\s*\/\s*/)
+            const title = (parts[0] || '').trim()
+            const authorPart = (parts[1] || '').trim()
+            const formatPart = (parts[2] || '').trim()
+
+            // 著者の解決（行指定があれば優先、なければ書籍著者の引き継ぎ）
+            let authorNames: string[] = []
+            if (authorPart) {
+              authorNames = authorPart
+                .split(/[、,&＆]/)
+                .map((s) => s.trim())
+                .filter(Boolean)
+            } else if (inheritAuthors && bookAuthors.length) {
+              authorNames = bookAuthors.map((p: any) => p.name)
+            }
+
+            // 形式の解決
+            let resolvedFormat = defaultFormat
+            if (formatPart) {
+              const matchedFmt = formatValues.find(
+                (f: string) => normal(f) === normal(formatPart)
+              )
+              resolvedFormat = matchedFmt || formatPart
+            }
+
+            // 既存作品の照合
+            const titleNorm = normal(title)
+            const authorNormSet = new Set(authorNames.map((n) => normal(n)))
+            const matchedWork = db.works.find((w: any) => {
+              if (normal(w.title) !== titleNorm) return false
+              const wAuthors = (w.people || [])
+                .map((m: any) => person(m.id)?.name || m.printed || '')
+                .filter(Boolean)
+              if (authorNormSet.size === 0 || wAuthors.length === 0) return true
+              return wAuthors.some((wa: string) => authorNormSet.has(normal(wa)))
+            })
+
+            return {
+              title,
+              authorNames,
+              format: resolvedFormat,
+              existingWorkId: matchedWork ? matchedWork.id : '',
+            }
+          })
+
+          openModal(
             `<h2>一括登録の内容確認（${parsedRows.length}件）</h2>
-            <p class="muted">同じ作品名・著者の既存作品が見つかった行は自動で「既存にリンク」が選択されています。著者が複数いる場合は、チェックボックスで残す著者を選べます。</p>
+            <p class="muted">各行の著者のチェックを外すと、その著者を除外して登録できます。</p>
             <div class="table-wrap" style="margin:12px 0;max-height:50vh;overflow:auto">
               <table>
                 <thead>
@@ -1987,9 +2085,9 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
                           ? `<div style="display:flex;flex-wrap:wrap;gap:6px">${row.authorNames
                               .map(
                                 (aName: string, aIdx: number) => `
-                                <label class="role-check" style="background:#f4f7f4;padding:3px 7px;border-radius:4px;border:1px solid #d5e3d8">
-                                  <input type="checkbox" data-bulk-row-author="${i}" data-author-idx="${aIdx}" checked>
-                                  ${esc(aName)}
+                                <label style="display:inline-flex;align-items:center;gap:5px;background:#f4f7f4;padding:4px 8px;border-radius:5px;border:1px solid #d5e3d8;cursor:pointer;font-size:13px">
+                                  <input type="checkbox" data-bulk-row-author="${i}" data-author-idx="${aIdx}" checked style="width:16px;height:16px;margin:0">
+                                  <span>${esc(aName)}</span>
                                 </label>`
                               )
                               .join('')}</div>`
@@ -2028,16 +2126,16 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
             </div>`
           )
 
-          $('#bulk-back-btn').onclick = () => bulkAddWorks(bookDraftObj, onDone)
+          $('#bulk-back-btn', modalBody).onclick = () => bulkAddWorks(bookDraftObj, onDone)
 
-          $('#bulk-exec-btn').onclick = () => {
+          $('#bulk-exec-btn', modalBody).onclick = () => {
             const addedWorkIds: string[] = []
             let createdWorksCount = 0
             let linkedExistingCount = 0
 
             parsedRows.forEach((row: any, i: number) => {
-              const selectedFormat = $(`[data-bulk-row-format="${i}"]`)?.value || ''
-              const modeSelect = $(`[data-bulk-row-mode="${i}"]`)
+              const selectedFormat = $(`[data-bulk-row-format="${i}"]`, modalBody)?.value || ''
+              const modeSelect = $(`[data-bulk-row-mode="${i}"]`, modalBody)
               const useExisting = row.existingWorkId && (!modeSelect || modeSelect.value === 'existing')
 
               if (useExisting) {
@@ -2046,18 +2144,16 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
                 return
               }
 
-              // 新規作品用に形式を候補へ記憶
               if (selectedFormat && !db.workFormats.includes(selectedFormat)) {
                 db.workFormats.push(selectedFormat)
               }
 
-              // チェックが残っている著者だけを抽出
-              const checkedBoxes = $$(`[data-bulk-row-author="${i}"]:checked`)
+              // modalBody 内からチェックが残っている著者だけを確実に取得
+              const checkedBoxes = $$(`input[data-bulk-row-author="${i}"]:checked`, modalBody)
               const selectedAuthorNames = checkedBoxes.map(
                 (cb: any) => row.authorNames[Number(cb.dataset.authorIdx)]
               )
 
-              // 著者名から people レコードを解決（なければ新規作成）
               const workPeople: any[] = []
               for (const aName of selectedAuthorNames) {
                 let p = db.people.find((per: any) => normal(per.name) === normal(aName))

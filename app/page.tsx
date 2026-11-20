@@ -188,7 +188,6 @@ const ITEM_LIST_COLUMNS = [
   'author',
   'people_json',
   'cover',
-  'deleted_at',
 ].join(',')
 
 export default function YopacAppPage() {
@@ -260,29 +259,28 @@ export default function YopacAppPage() {
           supabase
             .from('items')
             .select(ITEM_LIST_COLUMNS)
-            .is('deleted_at', null)
             .order('created_at', { ascending: false })
             .range(0, LIST_PAGE_SIZE - 1),
           fetchAll(
             'people',
             'id',
             true,
-            'id,record_id,name,reading,description,url,original_name,aliases_json,ndl_id,deleted_at'
+            'id,record_id,name,reading,description,url,original_name,aliases_json,ndl_id'
           ),
-          fetchAll('publishers', 'id', true, 'id,record_id,name,reading,labels_json,deleted_at'),
-          fetchAll('categories', 'code', true, 'id,record_id,code,name,deleted_at'),
+          fetchAll('publishers', 'id', true, 'id,record_id,name,reading,labels_json'),
+          fetchAll('categories', 'code', true, 'id,record_id,code,name'),
           supabase.from('settings').select('*'),
         ])
 
       if (initialItemsRes.error) {
         console.error('Fetch error on initial items:', initialItemsRes.error)
       }
-      const rawItems = initialItemsRes.data || []
+      const rawItems: any[] = (initialItemsRes.data as any[]) || []
 
       // 1. 分類 (classes)
       const classes = rawCategories
-        .filter((r) => !r.deleted_at)
-        .map((r) => ({
+        .filter((r: any) => !r.deleted_at)
+        .map((r: any) => ({
           id: String(r.record_id || r.id),
           _dbId: r.id,
           code: String(r.code ?? '').trim(),
@@ -299,8 +297,8 @@ export default function YopacAppPage() {
 
       // 2. 出版社 (publishers)
       const publishers = rawPublishers
-        .filter((r) => !r.deleted_at)
-        .map((r) => ({
+        .filter((r: any) => !r.deleted_at)
+        .map((r: any) => ({
           id: String(r.record_id || r.id),
           _dbId: r.id,
           name: String(r.name ?? '').trim(),
@@ -311,8 +309,8 @@ export default function YopacAppPage() {
 
       // 3. 人物・団体 (people)
       const people = rawPeople
-        .filter((r) => !r.deleted_at)
-        .map((r) => ({
+        .filter((r: any) => !r.deleted_at)
+        .map((r: any) => ({
           id: String(r.record_id || r.id),
           _dbId: r.id,
           name: String(r.name ?? '').trim(),
@@ -435,7 +433,7 @@ export default function YopacAppPage() {
         }
       }
 
-      const books = rawItems.filter((r) => !r.deleted_at).map((r) => mapBookRow(r, false))
+      const books = rawItems.filter((r: any) => !r.deleted_at).map((r: any) => mapBookRow(r, false))
 
       // 6. 設定 (options & revision)
       const settingsRows = rawSettings.data || []
@@ -533,7 +531,7 @@ export default function YopacAppPage() {
         if (worksLoadingPromise) return worksLoadingPromise
         worksLoadingPromise = (async () => {
           const rawWorks = await fetchAll('works', 'id', true)
-          const mappedWorks = rawWorks.filter((r) => !r.deleted_at).map(mapWorkRow)
+          const mappedWorks = rawWorks.filter((r: any) => !r.deleted_at).map(mapWorkRow)
           db.works = mappedWorks
           confirmedState.works = structuredClone(mappedWorks)
           worksLoaded = true
@@ -554,7 +552,6 @@ export default function YopacAppPage() {
           .from('items')
           .select('*')
           .eq('record_id', bookId)
-          .is('deleted_at', null)
           .maybeSingle()
         if (byRec.data) {
           row = byRec.data
@@ -563,7 +560,6 @@ export default function YopacAppPage() {
             .from('items')
             .select('*')
             .eq('id', Number(bookId))
-            .is('deleted_at', null)
             .maybeSingle()
           row = byId.data
         }
@@ -582,9 +578,8 @@ export default function YopacAppPage() {
               .from('works')
               .select('*')
               .in('record_id', missingIds)
-              .is('deleted_at', null)
             if (wRows && wRows.length > 0) {
-              for (const wr of wRows) {
+              for (const wr of (wRows as any[])) {
                 const mapped = mapWorkRow(wr)
                 if (!db.works.some((w: any) => w.id === mapped.id)) {
                   db.works.push(mapped)
@@ -1232,7 +1227,7 @@ export default function YopacAppPage() {
             hasAdvancedRules || filters.favorite || filters.sort === 'price' || filters.sort === 'purchasePrice'
           const cols = needsFullForRules ? '*' : ITEM_LIST_COLUMNS
 
-          let query = supabase.from('items').select(cols).is('deleted_at', null)
+          let query = supabase.from('items').select(cols)
 
           if (filters.publisher) query = query.eq('publisher_id', filters.publisher)
           if (filters.status) query = query.eq('status', filters.status)
@@ -1256,7 +1251,7 @@ export default function YopacAppPage() {
 
           if (error) throw error
 
-          const rows = (data || []).filter((r: any) => !r.deleted_at)
+          const rows: any[] = ((data as any[]) || []).filter((r: any) => !r.deleted_at)
           const mapped = rows.map((r: any) => mapBookRow(r, needsFullForRules))
           await resolveCoverUrlsBatch(mapped)
           syncBooksIntoConfirmed(mapped)

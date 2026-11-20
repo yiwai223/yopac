@@ -3224,8 +3224,27 @@ export default function YopacAppPage() {
         }
       }
 
-      function publisherDetail(p: any) {
-        const relBooks = db.books.filter((b: any) => b.publisher === p.id)
+      async function publisherDetail(p: any) {
+        app.innerHTML = '<div class="panel"><p>出版者・レーベルの関連書籍を読み込み中…</p></div>'
+        let relBooks: any[] = []
+        try {
+          const safeName = String(p.name || '').replace(/[,%()]/g, ' ').trim()
+          const orCond = safeName
+            ? `publisher_id.eq.${p.id},publisher.eq.${safeName}`
+            : `publisher_id.eq.${p.id}`
+          const { data } = await supabase
+            .from('items')
+            .select(ITEM_LIST_COLUMNS)
+            .or(orCond)
+            .order('created_at', { ascending: false })
+            .limit(500)
+          relBooks = ((data as any[]) || [])
+            .filter((r: any) => !r.deleted_at)
+            .map((r: any) => mapBookRow(r, false))
+        } catch (err) {
+          console.error('Fetch publisher books error:', err)
+          relBooks = db.books.filter((b: any) => b.publisher === p.id)
+        }
         app.innerHTML = `<div class="breadcrumb"><a href="#publishers">出版者・レーベル</a> › 詳細</div><div class="page-head"><h1>${esc(
           p.name
         )}</h1><div class="detail-actions"><button type="button" id="edit-publisher" class="primary">編集</button> <button type="button" id="delete-publisher" class="danger">削除</button></div></div><div class="detail-grid"><div class="fields">${detailField(
@@ -3234,7 +3253,9 @@ export default function YopacAppPage() {
         )}${detailField(
           'よみ',
           esc(p.reading)
-        )}</div><section class="panel"><h2>関連書籍</h2><button type="button" data-publisher="${
+        )}</div><section class="panel"><h2>関連書籍 <span class="count">${
+          relBooks.length
+        }冊</span></h2><button type="button" data-publisher="${
           p.id
         }">所蔵リストを表示</button><ul class="relations">${
           relBooks
@@ -3244,7 +3265,7 @@ export default function YopacAppPage() {
                   b.status
                 )}</span></li>`
             )
-            .join('') || '<li class="muted">該当書籍なし（上のボタンからDB全体を検索できます）</li>'
+            .join('') || '<li class="muted">該当書籍なし</li>'
         }</ul></section></div>`
         bindFilterLinks()
         $('#edit-publisher').onclick = () => editPublisher(p)
@@ -3285,10 +3306,35 @@ export default function YopacAppPage() {
       }
 
       async function personDetail(p: any) {
-        await ensureWorksLoaded()
-        const relBooks = db.books.filter((b: any) =>
-          (b.people || []).some((x: any) => x.id === p.id)
-        )
+        app.innerHTML = '<div class="panel"><p>関連書籍・作品を読み込み中…</p></div>'
+        const safeName = String(p.name || '').replace(/[,%()]/g, ' ').trim()
+        const orParts = [`people_json.ilike.%${p.id}%`]
+        if (safeName) orParts.push(`author.ilike.%${safeName}%`)
+
+        const [booksRes] = await Promise.all([
+          supabase
+            .from('items')
+            .select(ITEM_LIST_COLUMNS)
+            .or(orParts.join(','))
+            .order('created_at', { ascending: false })
+            .limit(500),
+          ensureWorksLoaded(),
+        ])
+
+        const fetchedBooks = ((booksRes.data as any[]) || [])
+          .filter((r: any) => !r.deleted_at)
+          .map((r: any) => mapBookRow(r, false))
+          .filter((b: any) => (b.people || []).some((x: any) => x.id === p.id))
+
+        const relBooksMap = new Map<string, any>()
+        for (const b of fetchedBooks) relBooksMap.set(b.id, b)
+        for (const b of db.books) {
+          if ((b.people || []).some((x: any) => x.id === p.id) && !relBooksMap.has(b.id)) {
+            relBooksMap.set(b.id, b)
+          }
+        }
+        const relBooks = Array.from(relBooksMap.values())
+
         const relWorks = db.works.filter((w: any) =>
           (w.people || []).some((x: any) => x.id === p.id)
         )
@@ -3312,7 +3358,9 @@ export default function YopacAppPage() {
                 p.ndlId
               )}" target="_blank" rel="noopener">${esc(p.ndlId)}</a>`
             : ''
-        )}</div><div><section class="panel"><h2>読込済みの関連書籍</h2><ul class="relations">${
+        )}</div><div><section class="panel"><h2>関連書籍 <span class="count">${
+          relBooks.length
+        }冊</span></h2><ul class="relations">${
           relBooks
             .map((b: any) => {
               const m = (b.people || []).find((x: any) => x.id === p.id)
@@ -3425,8 +3473,27 @@ export default function YopacAppPage() {
       }
 
       async function workDetail(w: any) {
-        await ensureWorksLoaded()
-        const relBooks = db.books.filter((b: any) => (b.works || []).includes(w.id))
+        app.innerHTML = '<div class="panel"><p>収録先書籍を読み込み中…</p></div>'
+        const [booksRes] = await Promise.all([
+          supabase
+            .from('items')
+            .select(ITEM_LIST_COLUMNS + ',works_json')
+            .ilike('works_json', `%${w.id}%`)
+            .order('created_at', { ascending: false })
+            .limit(500),
+          ensureWorksLoaded(),
+        ])
+        const relBooksMap = new Map<string, any>()
+        for (const r of ((booksRes.data as any[]) || []).filter((x: any) => !x.deleted_at)) {
+          const b = mapBookRow(r, false)
+          relBooksMap.set(b.id, b)
+        }
+        for (const b of db.books) {
+          if ((b.works || []).includes(w.id) && !relBooksMap.has(b.id)) {
+            relBooksMap.set(b.id, b)
+          }
+        }
+        const relBooks = Array.from(relBooksMap.values())
         const translations = [
           ...new Set([
             ...(w.translations || []),
@@ -3449,7 +3516,7 @@ export default function YopacAppPage() {
         )}${detailField(
           '原作タイトル',
           esc(w.originalTitle)
-        )}</section><section><div class="panel"><h2>収録先</h2><ul class="relations">${
+        )}</section><section><div class="panel"><h2>収録先 <span class="count">${relBooks.length}冊</span></h2><ul class="relations">${
           relBooks
             .map((b: any) => `<li><a href="#book/${b.id}">${esc(b.title)}</a></li>`)
             .join('') || '<li>該当なし</li>'
@@ -4215,7 +4282,7 @@ export default function YopacAppPage() {
             break
           case 'publisher': {
             const p = db.publishers.find((x: any) => x.id === key)
-            p ? publisherDetail(p) : notFound()
+            p ? await publisherDetail(p) : notFound()
             break
           }
           case 'people':

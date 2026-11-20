@@ -169,6 +169,28 @@ const AMBIGUOUS_NAME_DEFAULT_CODE: Record<string, string> = {
   '参考図書［レファレンスブック］': '403',
 }
 
+const LIST_PAGE_SIZE = 100
+const ITEM_LIST_COLUMNS = [
+  'id',
+  'record_id',
+  'title',
+  'subtitle',
+  'series',
+  'volume',
+  'publisher_id',
+  'publisher',
+  'category',
+  'classification',
+  'status',
+  'isbn',
+  'created_at',
+  'modified_at',
+  'author',
+  'people_json',
+  'cover',
+  'deleted_at',
+].join(',')
+
 export default function YopacAppPage() {
   const router = useRouter()
   const supabase = createClient()
@@ -192,14 +214,19 @@ export default function YopacAppPage() {
 
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
 
-      async function fetchAll(tableName: string, orderCol = 'id', ascending = true) {
+      async function fetchAll(
+        tableName: string,
+        orderCol = 'id',
+        ascending = true,
+        columns = '*'
+      ) {
         let all: any[] = []
         let from = 0
         const step = 1000
         while (true) {
           const { data, error } = await supabase
             .from(tableName)
-            .select('*')
+            .select(columns)
             .order(orderCol, { ascending })
             .range(from, from + step - 1)
           if (error) {
@@ -227,15 +254,30 @@ export default function YopacAppPage() {
       const syncEl = document.getElementById('sync-status')
       if (syncEl) syncEl.textContent = 'データを読み込み中…'
 
-      const [rawItems, rawPeople, rawWorks, rawPublishers, rawCategories, rawSettings] =
+      // 起動時は items を最新100件・最小カラムのみ取得し、works は遅延読み込みする
+      const [initialItemsRes, rawPeople, rawPublishers, rawCategories, rawSettings] =
         await Promise.all([
-          fetchAll('items', 'created_at', false),
-          fetchAll('people', 'id', true),
-          fetchAll('works', 'id', true),
-          fetchAll('publishers', 'id', true),
-          fetchAll('categories', 'code', true),
+          supabase
+            .from('items')
+            .select(ITEM_LIST_COLUMNS)
+            .is('deleted_at', null)
+            .order('created_at', { ascending: false })
+            .range(0, LIST_PAGE_SIZE - 1),
+          fetchAll(
+            'people',
+            'id',
+            true,
+            'id,record_id,name,reading,description,url,original_name,aliases_json,ndl_id,deleted_at'
+          ),
+          fetchAll('publishers', 'id', true, 'id,record_id,name,reading,labels_json,deleted_at'),
+          fetchAll('categories', 'code', true, 'id,record_id,code,name,deleted_at'),
           supabase.from('settings').select('*'),
         ])
+
+      if (initialItemsRes.error) {
+        console.error('Fetch error on initial items:', initialItemsRes.error)
+      }
+      const rawItems = initialItemsRes.data || []
 
       // 1. 分類 (classes)
       const classes = rawCategories
@@ -283,112 +325,117 @@ export default function YopacAppPage() {
         }))
       const personNameToId = new Map(people.map((p) => [p.name, p.id]))
 
-      // 4. 作品 (works)
-      const works = rawWorks
-        .filter((r) => !r.deleted_at)
-        .map((r) => {
-          let wPeople = safeJsonParse(r.people_json, [])
-          if ((!wPeople || !wPeople.length) && r.author) {
-            wPeople = String(r.author)
-              .split(',')
-              .map((s) => s.trim())
-              .filter(Boolean)
-              .map((entry) => {
-                const m = entry.match(/^(.+?)\s*\((.+)\)$/)
-                const name = m ? m[1].trim() : entry
-                const roles = m ? m[2].split('/').map((x) => x.trim()) : []
-                const pid = personNameToId.get(name)
-                return pid ? { id: pid, roles, printed: '' } : null
-              })
-              .filter(Boolean)
-          }
-          return {
-            id: String(r.record_id || r.id),
-            _dbId: r.id,
-            title: String(r.title ?? '').trim(),
-            format: String(r.format ?? '').trim(),
-            first: String(r.first_published ?? '').trim(),
-            originalTitle: String(r.original_title ?? '').trim(),
-            people: Array.isArray(wPeople) ? wPeople : [],
-            originals: safeJsonParse(r.original_ids_json, []),
-            translations: safeJsonParse(r.translation_ids_json, []),
-          }
-        })
+      function mapWorkRow(r: any) {
+        let wPeople = safeJsonParse(r.people_json, [])
+        if ((!wPeople || !wPeople.length) && r.author) {
+          wPeople = String(r.author)
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((entry) => {
+              const m = entry.match(/^(.+?)\s*\((.+)\)$/)
+              const name = m ? m[1].trim() : entry
+              const roles = m ? m[2].split('/').map((x) => x.trim()) : []
+              const pid = personNameToId.get(name)
+              return pid ? { id: pid, roles, printed: '' } : null
+            })
+            .filter(Boolean)
+        }
+        return {
+          id: String(r.record_id || r.id),
+          _dbId: r.id,
+          title: String(r.title ?? '').trim(),
+          format: String(r.format ?? '').trim(),
+          first: String(r.first_published ?? '').trim(),
+          originalTitle: String(r.original_title ?? '').trim(),
+          people: Array.isArray(wPeople) ? wPeople : [],
+          originals: safeJsonParse(r.original_ids_json, []),
+          translations: safeJsonParse(r.translation_ids_json, []),
+        }
+      }
 
-      // 5. 書籍 (books)
-      const books = rawItems
-        .filter((r) => !r.deleted_at)
-        .map((r) => {
-          const rawObj = safeJsonParse(r.raw_json || r.saved_json, null)
-          const rawCat = String(r.classification || r.category || rawObj?.classification || '').trim()
-          const cleanCat =
-            rawCat === 'nan'
-              ? ''
-              : /^\d/.test(rawCat) || /^Z/i.test(rawCat)
-              ? rawCat
-              : nameToCodeMap[rawCat] || rawCat
+      function mapBookRow(r: any, isFullDetail = false) {
+        const rawObj = isFullDetail ? safeJsonParse(r.raw_json || r.saved_json, null) : null
+        const rawCat = String(r.classification || r.category || rawObj?.classification || '').trim()
+        const cleanCat =
+          rawCat === 'nan'
+            ? ''
+            : /^\d/.test(rawCat) || /^Z/i.test(rawCat)
+            ? rawCat
+            : nameToCodeMap[rawCat] || rawCat
 
-          let bPeople = safeJsonParse(r.people_json, null) ?? rawObj?.people ?? []
-          if ((!Array.isArray(bPeople) || bPeople.length === 0) && r.author) {
-            bPeople = String(r.author)
-              .split(/\s*\/\s*|\n/)
-              .map((s) => s.trim())
-              .filter(Boolean)
-              .map((part) => {
-                const tokens = part.split(/\s+/)
-                if (tokens.length >= 2) {
-                  const maybeRole = tokens[tokens.length - 1]
-                  const maybeName = tokens.slice(0, -1).join(' ')
-                  if (personNameToId.has(maybeName)) {
-                    return {
-                      id: personNameToId.get(maybeName),
-                      roles: maybeRole.split('・').filter(Boolean),
-                      printed: '',
-                    }
+        let bPeople = safeJsonParse(r.people_json, null) ?? rawObj?.people ?? []
+        if ((!Array.isArray(bPeople) || bPeople.length === 0) && r.author) {
+          bPeople = String(r.author)
+            .split(/\s*\/\s*|\n/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((part) => {
+              const tokens = part.split(/\s+/)
+              if (tokens.length >= 2) {
+                const maybeRole = tokens[tokens.length - 1]
+                const maybeName = tokens.slice(0, -1).join(' ')
+                if (personNameToId.has(maybeName)) {
+                  return {
+                    id: personNameToId.get(maybeName),
+                    roles: maybeRole.split('・').filter(Boolean),
+                    printed: '',
                   }
                 }
-                const pid = personNameToId.get(part)
-                return pid ? { id: pid, roles: [], printed: '' } : null
-              })
-              .filter(Boolean)
-          }
+              }
+              const pid = personNameToId.get(part)
+              return pid ? { id: pid, roles: [], printed: '' } : null
+            })
+            .filter(Boolean)
+        }
 
-          let pubId = String(r.publisher_id || rawObj?.publisher || '').trim()
-          if (!pubId && r.publisher) {
-            pubId = pubNameToId.get(String(r.publisher).trim()) || ''
-          }
+        let pubId = String(r.publisher_id || rawObj?.publisher || '').trim()
+        if (!pubId && r.publisher) {
+          pubId = pubNameToId.get(String(r.publisher).trim()) || ''
+        }
 
-          return {
-            id: String(r.record_id || rawObj?.id || r.id),
-            _dbId: r.id,
-            title: String(r.title ?? rawObj?.title ?? '').trim(),
-            subtitle: String(r.subtitle ?? rawObj?.subtitle ?? '').trim(),
-            series: String(r.series ?? rawObj?.series ?? '').trim(),
-            volume: String(r.volume ?? rawObj?.volume ?? '').trim(),
-            publisher: pubId,
-            classification: cleanCat,
-            status: String(r.status || rawObj?.status || '所蔵').trim(),
-            isbn: String(r.isbn ?? rawObj?.isbn ?? '').replace(/\.0$/, '').trim(),
-            price: String(r.price ?? rawObj?.price ?? '').replace(/\.0$/, '').trim(),
-            purchasePrice: String(r.purchase_price ?? rawObj?.purchasePrice ?? '')
-              .replace(/\.0$/, '')
-              .trim(),
-            registered: String(r.created_at || rawObj?.registered || new Date().toISOString()),
-            modified: String(
-              r.modified_at || rawObj?.modified || r.created_at || new Date().toISOString()
-            ),
-            people: Array.isArray(bPeople) ? bPeople : [],
-            works: safeJsonParse(r.works_json, null) ?? rawObj?.works ?? [],
-            related: safeJsonParse(r.related_json, null) ?? rawObj?.related ?? [],
-            rating: String(r.rating ?? rawObj?.rating ?? '').replace(/\.0$/, '').trim(),
-            review: String(r.review ?? rawObj?.review ?? '').trim(),
-            memo: String(r.memo ?? rawObj?.memo ?? '').trim(),
-            cover: String(r.cover ?? rawObj?.cover ?? '').trim(),
-            coverAvailable: Boolean(rawObj?.coverAvailable || r.cover),
-            coverAssets: safeJsonParse(r.cover_assets_json, null) ?? rawObj?.coverAssets ?? [],
-            favorite: Boolean(rawObj?.favorite),
-          }
-        })
+        return {
+          id: String(r.record_id || rawObj?.id || r.id),
+          _dbId: r.id,
+          _detailLoaded: isFullDetail,
+          title: String(r.title ?? rawObj?.title ?? '').trim(),
+          subtitle: String(r.subtitle ?? rawObj?.subtitle ?? '').trim(),
+          series: String(r.series ?? rawObj?.series ?? '').trim(),
+          volume: String(r.volume ?? rawObj?.volume ?? '').trim(),
+          publisher: pubId,
+          classification: cleanCat,
+          status: String(r.status || rawObj?.status || '所蔵').trim(),
+          isbn: String(r.isbn ?? rawObj?.isbn ?? '').replace(/\.0$/, '').trim(),
+          price: isFullDetail
+            ? String(r.price ?? rawObj?.price ?? '').replace(/\.0$/, '').trim()
+            : '',
+          purchasePrice: isFullDetail
+            ? String(r.purchase_price ?? rawObj?.purchasePrice ?? '')
+                .replace(/\.0$/, '')
+                .trim()
+            : '',
+          registered: String(r.created_at || rawObj?.registered || new Date().toISOString()),
+          modified: String(
+            r.modified_at || rawObj?.modified || r.created_at || new Date().toISOString()
+          ),
+          people: Array.isArray(bPeople) ? bPeople : [],
+          works: isFullDetail ? safeJsonParse(r.works_json, null) ?? rawObj?.works ?? [] : [],
+          related: isFullDetail ? safeJsonParse(r.related_json, null) ?? rawObj?.related ?? [] : [],
+          rating: isFullDetail
+            ? String(r.rating ?? rawObj?.rating ?? '').replace(/\.0$/, '').trim()
+            : '',
+          review: isFullDetail ? String(r.review ?? rawObj?.review ?? '').trim() : '',
+          memo: isFullDetail ? String(r.memo ?? rawObj?.memo ?? '').trim() : '',
+          cover: String(r.cover ?? rawObj?.cover ?? '').trim(),
+          coverAvailable: Boolean(rawObj?.coverAvailable || r.cover),
+          coverAssets: isFullDetail
+            ? safeJsonParse(r.cover_assets_json, null) ?? rawObj?.coverAssets ?? []
+            : [],
+          favorite: isFullDetail ? Boolean(rawObj?.favorite) : false,
+        }
+      }
+
+      const books = rawItems.filter((r) => !r.deleted_at).map((r) => mapBookRow(r, false))
 
       // 6. 設定 (options & revision)
       const settingsRows = rawSettings.data || []
@@ -399,7 +446,7 @@ export default function YopacAppPage() {
       let db: any = {
         books,
         people,
-        works,
+        works: [],
         publishers,
         classes,
         roles: parsedOptions.roles || ['著者', '訳者', '編者', 'その他'],
@@ -443,6 +490,128 @@ export default function YopacAppPage() {
       let pendingTarget: any = null
       let saveRunning = false
       let saveBlocked = false
+      let worksLoaded = false
+      let worksLoadingPromise: Promise<void> | null = null
+      let hasMoreServerBooks = rawItems.length >= LIST_PAGE_SIZE
+      let serverOffset = rawItems.length
+      let isListSearching = false
+
+      // 書影署名付きURLキャッシュ（createSignedUrls で一括取得）
+      const signedCoverUrlMap = new Map<string, string>()
+
+      async function resolveCoverUrlsBatch(targetBooks: any[]) {
+        const fileNames = Array.from(
+          new Set(
+            targetBooks
+              .map((b) => String(b.cover || '').trim())
+              .filter((v) => v.startsWith('asset:'))
+              .map((v) => v.slice(6).trim())
+              .filter((name) => name && !signedCoverUrlMap.has(name))
+          )
+        )
+        if (!fileNames.length) return
+        try {
+          const { data, error } = await supabase.storage
+            .from('covers')
+            .createSignedUrls(fileNames, 3600)
+          if (!error && data) {
+            for (const entry of data) {
+              if (entry.path && entry.signedUrl) {
+                signedCoverUrlMap.set(entry.path, entry.signedUrl)
+              }
+            }
+          }
+        } catch (err) {
+          console.error('Batch signed URL fetch failed:', err)
+        }
+      }
+
+      await resolveCoverUrlsBatch(db.books)
+
+      async function ensureWorksLoaded() {
+        if (worksLoaded) return
+        if (worksLoadingPromise) return worksLoadingPromise
+        worksLoadingPromise = (async () => {
+          const rawWorks = await fetchAll('works', 'id', true)
+          const mappedWorks = rawWorks.filter((r) => !r.deleted_at).map(mapWorkRow)
+          db.works = mappedWorks
+          confirmedState.works = structuredClone(mappedWorks)
+          worksLoaded = true
+        })()
+        try {
+          await worksLoadingPromise
+        } finally {
+          worksLoadingPromise = null
+        }
+      }
+
+      async function ensureBookDetailLoaded(bookId: string) {
+        let existing = db.books.find((x: any) => x.id === bookId)
+        if (existing && existing._detailLoaded) return existing
+
+        let row: any = null
+        const byRec = await supabase
+          .from('items')
+          .select('*')
+          .eq('record_id', bookId)
+          .is('deleted_at', null)
+          .maybeSingle()
+        if (byRec.data) {
+          row = byRec.data
+        } else if (/^\d+$/.test(bookId)) {
+          const byId = await supabase
+            .from('items')
+            .select('*')
+            .eq('id', Number(bookId))
+            .is('deleted_at', null)
+            .maybeSingle()
+          row = byId.data
+        }
+        if (!row) return null
+
+        const fullBook = mapBookRow(row, true)
+        await resolveCoverUrlsBatch([fullBook])
+
+        // 収録作品IDが含まれていて works 未読込なら必要な作品だけ取得（未読込のとき）
+        if (Array.isArray(fullBook.works) && fullBook.works.length > 0 && !worksLoaded) {
+          const missingIds = fullBook.works.filter(
+            (wid: string) => !db.works.some((w: any) => w.id === wid)
+          )
+          if (missingIds.length > 0) {
+            const { data: wRows } = await supabase
+              .from('works')
+              .select('*')
+              .in('record_id', missingIds)
+              .is('deleted_at', null)
+            if (wRows && wRows.length > 0) {
+              for (const wr of wRows) {
+                const mapped = mapWorkRow(wr)
+                if (!db.works.some((w: any) => w.id === mapped.id)) {
+                  db.works.push(mapped)
+                  confirmedState.works.push(structuredClone(mapped))
+                }
+              }
+            }
+          }
+        }
+
+        const idx = db.books.findIndex((x: any) => x.id === fullBook.id)
+        if (idx >= 0) db.books[idx] = fullBook
+        else db.books.push(fullBook)
+
+        const cIdx = confirmedState.books.findIndex((x: any) => x.id === fullBook.id)
+        if (cIdx >= 0) confirmedState.books[cIdx] = structuredClone(fullBook)
+        else confirmedState.books.push(structuredClone(fullBook))
+
+        return fullBook
+      }
+
+      function syncBooksIntoConfirmed(fetchedBooks: any[]) {
+        for (const fb of fetchedBooks) {
+          const idx = confirmedState.books.findIndex((x: any) => x.id === fb.id)
+          if (idx < 0) confirmedState.books.push(structuredClone(fb))
+        }
+      }
 
       const ADMIN_EMAIL = 'yiwai223@gmail.com'
       const urlParams = new URLSearchParams(window.location.search)
@@ -506,6 +675,9 @@ export default function YopacAppPage() {
                 .filter(Boolean)
                 .join(' / ')
 
+              const cleanCopy = structuredClone(value)
+              delete cleanCopy._detailLoaded
+
               const payload: any = {
                 record_id: value.id,
                 title: value.title || '（無題）',
@@ -530,10 +702,11 @@ export default function YopacAppPage() {
                 works_json: JSON.stringify(value.works || []),
                 related_json: JSON.stringify(value.related || []),
                 rating: value.rating === '' || value.rating == null ? null : Number(value.rating),
-                review: value.review || '',                memo: value.memo || '',
+                review: value.review || '',
+                memo: value.memo || '',
                 cover: value.cover || '',
                 cover_assets_json: JSON.stringify(value.coverAssets || []),
-                raw_json: JSON.stringify(value),
+                raw_json: JSON.stringify(cleanCopy),
               }
 
               const { data: existing } = await supabase
@@ -724,7 +897,7 @@ export default function YopacAppPage() {
         }
       }
 
-      // 3. 書影解決ロジック（Supabase Storage `covers` バケット ＋ ISBN書影API自動フォールバック）
+      // 3. 書影解決ロジック（batch createSignedUrls 優先 ＋ public URL / NDL書影API フォールバック）
       const placeholderCover =
         'data:image/svg+xml,' +
         encodeURIComponent(
@@ -749,9 +922,13 @@ export default function YopacAppPage() {
           if (value.startsWith('data:') || value.startsWith('http://') || value.startsWith('https://')) {
             return value
           }
-          if (value.startsWith('asset:') && supabaseUrl) {
+          if (value.startsWith('asset:')) {
             const fileName = value.slice(6).trim()
-            return `${supabaseUrl}/storage/v1/object/public/covers/${encodeURIComponent(fileName)}`
+            const signed = signedCoverUrlMap.get(fileName)
+            if (signed) return signed
+            if (supabaseUrl) {
+              return `${supabaseUrl}/storage/v1/object/public/covers/${encodeURIComponent(fileName)}`
+            }
           }
         }
         if (isbn13) {
@@ -894,6 +1071,30 @@ export default function YopacAppPage() {
           .join(' ')
       }
 
+      // 一覧カード用：著者・訳者・編者を先頭3名まで表示 + 「ほか」
+      function renderCardPeopleDesktop(m: any[]) {
+        const list = m || []
+        if (!list.length) return ''
+        const head = list.slice(0, 3).map((p: any) => {
+          const name = esc(person(p.id)?.name || p.printed || '未設定')
+          const roleText = esc((p.roles || []).join('・') || '役割未設定')
+          return role === 'admin'
+            ? `<a href="#person/${p.id}">${name}</a><span class="role">${roleText}</span>`
+            : `<span>${name}</span><span class="role">${roleText}</span>`
+        })
+        if (list.length > 3) head.push('<span class="muted">ほか</span>')
+        return head.join('<br>')
+      }
+
+      function renderCardPeopleMobile(m: any[]) {
+        const names = (m || [])
+          .map((p: any) => person(p.id)?.name || p.printed)
+          .filter(Boolean)
+        if (!names.length) return ''
+        const text = names.slice(0, 3).join(' / ')
+        return names.length > 3 ? `${text} ほか` : text
+      }
+
       const fieldDefs: Record<string, string> = {
         title: '書名',
         subtitle: '副題',
@@ -981,41 +1182,118 @@ export default function YopacAppPage() {
         favorite: false,
         tree: { mode: 'AND', negate: false, children: [] },
       }
-      let page = 1
       let advanced = false
-      let lastResults: any[] = []
+      let lastResults: any[] = [...db.books]
 
-      function selectedBooks() {
-        const a = db.books.filter(
-          (b: any) =>
-            (!filters.q ||
-              normal(
-                [
-                  b.title,
-                  b.subtitle,
-                  memberships(b.people),
-                  (b.works || []).map((i: string) => work(i)?.title || '').join(' '),
-                  publisher(b.publisher),
-                  b.isbn,
-                ].join(' ')
-              ).includes(normal(filters.q))) &&
-            (!filters.publisher || b.publisher === filters.publisher) &&
-            (!filters.status || b.status === filters.status) &&
-            (!filters.series || b.series === filters.series) &&
-            (!filters.cls || String(b.classification || '').startsWith(filters.cls)) &&
-            (!filters.favorite || b.favorite) &&
-            evaluate(b, filters.tree)
+      function hasActiveServerFilters() {
+        return Boolean(
+          filters.q.trim() ||
+            filters.publisher ||
+            filters.status ||
+            filters.series ||
+            filters.cls ||
+            filters.favorite ||
+            (filters.tree?.children && filters.tree.children.length > 0)
         )
-        a.sort((xObj: any, yObj: any) => {
-          let x = valueFor(xObj, filters.sort)
-          let y = valueFor(yObj, filters.sort)
-          if (filters.sort === 'volume') {
-            x = xObj.volume
-            y = yObj.volume
+      }
+
+      function sortColumnName(sortKey: string) {
+        switch (sortKey) {
+          case 'modified':
+            return 'modified_at'
+          case 'classification':
+            return 'classification'
+          case 'publisher':
+            return 'publisher'
+          case 'title':
+            return 'title'
+          case 'volume':
+            return 'volume'
+          case 'price':
+            return 'price'
+          case 'purchasePrice':
+            return 'purchase_price'
+          default:
+            return 'created_at'
+        }
+      }
+
+      // 検索ボタン・条件変更時に Supabase（DB）へ直接問い合わせる
+      async function runServerSearch({ append = false }: { append?: boolean } = {}) {
+        isListSearching = true
+        saveStateLabel('検索中…')
+        const offset = append ? serverOffset : 0
+
+        try {
+          const hasAdvancedRules = Boolean(
+            filters.tree?.children && filters.tree.children.length > 0
+          )
+          const needsFullForRules =
+            hasAdvancedRules || filters.favorite || filters.sort === 'price' || filters.sort === 'purchasePrice'
+          const cols = needsFullForRules ? '*' : ITEM_LIST_COLUMNS
+
+          let query = supabase.from('items').select(cols).is('deleted_at', null)
+
+          if (filters.publisher) query = query.eq('publisher_id', filters.publisher)
+          if (filters.status) query = query.eq('status', filters.status)
+          if (filters.series) query = query.eq('series', filters.series)
+          if (filters.cls) query = query.ilike('classification', `${filters.cls}%`)
+
+          const kw = filters.q.trim()
+          if (kw) {
+            const safeKw = kw.replace(/[,%()]/g, ' ').trim()
+            if (safeKw) {
+              const pat = `%${safeKw}%`
+              query = query.or(
+                `title.ilike.${pat},subtitle.ilike.${pat},series.ilike.${pat},volume.ilike.${pat},author.ilike.${pat},publisher.ilike.${pat},isbn.ilike.${pat}`
+              )
+            }
           }
-          return normal(x).localeCompare(normal(y), 'ja', { numeric: true }) * (filters.asc ? 1 : -1)
-        })
-        return a
+
+          const { data, error } = await query
+            .order(sortColumnName(filters.sort), { ascending: filters.asc })
+            .range(offset, offset + LIST_PAGE_SIZE - 1)
+
+          if (error) throw error
+
+          const rows = (data || []).filter((r: any) => !r.deleted_at)
+          const mapped = rows.map((r: any) => mapBookRow(r, needsFullForRules))
+          await resolveCoverUrlsBatch(mapped)
+          syncBooksIntoConfirmed(mapped)
+
+          hasMoreServerBooks = rows.length >= LIST_PAGE_SIZE
+          serverOffset = offset + rows.length
+
+          const filtered = mapped.filter(
+            (b: any) => (!filters.favorite || b.favorite) && evaluate(b, filters.tree)
+          )
+
+          if (append) {
+            const existingIds = new Set(lastResults.map((b: any) => b.id))
+            lastResults = [...lastResults, ...filtered.filter((b: any) => !existingIds.has(b.id))]
+            for (const b of mapped) {
+              if (!db.books.some((x: any) => x.id === b.id)) db.books.push(b)
+            }
+          } else {
+            lastResults = filtered
+            // 未保存の変更がない場合のみ検索結果をキャッシュへ反映
+            if (!pendingTarget && !saveRunning) {
+              for (const b of mapped) {
+                const idx = db.books.findIndex((x: any) => x.id === b.id)
+                if (idx < 0) db.books.push(b)
+                else if (!db.books[idx]._detailLoaded) db.books[idx] = b
+              }
+            }
+          }
+          saveStateLabel('読み込み済み')
+        } catch (err: any) {
+          console.error('Search error:', err)
+          saveStateLabel('検索に失敗しました', true)
+          notify('検索中にエラーが発生しました')
+        } finally {
+          isListSearching = false
+          listBooks()
+        }
       }
 
       function ruleHTML(g: any, path = ''): string {
@@ -1075,22 +1353,24 @@ export default function YopacAppPage() {
         $$('#conditions [data-path]').forEach(walk)
       }
 
-      function listBooks(preserveInput = false) {
-        lastResults = selectedBooks()
-        const pages = Math.max(1, Math.ceil(lastResults.length / 25))
-        page = Math.min(page, pages)
-        const visible = lastResults.slice((page - 1) * 25, page * 25)
-        const markup = `<div class="page-head"><div><h1>所蔵リスト</h1><div class="count">${
-          db.books.length
-        }冊から ${lastResults.length}冊${filters.series ? ' · ' + esc(filters.series) : ''}${
+      function listBooks() {
+        const visible = lastResults
+        const activeFilter = hasActiveServerFilters()
+        const countText = `${activeFilter ? '検索結果：' : '最新登録：'}${visible.length}冊${
+          filters.series ? ' · ' + esc(filters.series) : ''
+        }${
           filters.cls
             ? ' · ' + esc(filters.cls) + ' ' + esc(classLabel(filters.cls, filters.cls.length))
             : ''
-        }</div></div>${
+        }`
+
+        const markup = `<div class="page-head"><div><h1>所蔵リスト</h1><div class="count">${countText}</div></div>${
           role === 'admin' ? '<a class="button primary" href="#book/new">＋ 蔵書追加</a>' : ''
-        }</div><form class="toolbar" id="quick-search" role="search"><input type="search" id="search" aria-label="蔵書検索" enterkeyhint="search" autocomplete="off" placeholder="書名・人物名・作品名・出版社・ISBNで検索" value="${esc(
+        }</div><form class="toolbar" id="quick-search" role="search"><input type="search" id="search" aria-label="蔵書検索" enterkeyhint="search" autocomplete="off" placeholder="書名・著者名・シリーズ・出版社・ISBNで検索" value="${esc(
           filters.q
-        )}"><button type="submit" class="primary" id="run-search">検索</button><button type="button" id="scan">ISBN読取</button><button type="button" id="advanced" class="${
+        )}"><button type="submit" class="primary" id="run-search" ${
+          isListSearching ? 'disabled' : ''
+        }>${isListSearching ? '検索中...' : '検索'}</button><button type="button" id="scan">ISBN読取</button><button type="button" id="advanced" class="${
           advanced ? 'secondary' : ''
         }">詳細検索</button></form><div class="toolbar"><select id="status-filter" aria-label="状態"><option value="">すべての状態</option>${opts(
           db.statuses,
@@ -1125,8 +1405,8 @@ export default function YopacAppPage() {
                 db.saved.map((x: any) => ({ id: x.id, name: x.name }))
               )}</select>`
             : ''
-        }</div></section><div class="toolbar no-print"><button type="button" id="csv">CSV出力</button><button type="button" id="print">印刷・PDF保存</button><span class="muted" id="output-count">現在の条件・並び順で全${
-          lastResults.length
+        }</div></section><div class="toolbar no-print"><button type="button" id="csv">CSV出力</button><button type="button" id="print">印刷・PDF保存</button><span class="muted" id="output-count">表示中の${
+          visible.length
         }冊を出力</span></div><div class="desktop-list table-wrap"><table><thead><tr><th>題名</th><th>著者等</th><th>出版社</th><th>分類・主題分野</th><th>状態</th></tr></thead><tbody>${visible
           .map(
             (b: any) =>
@@ -1151,21 +1431,9 @@ export default function YopacAppPage() {
                   : b.volume
                   ? `<div class="muted">${esc(b.volume)}</div>`
                   : ''
-              }</div></div></td><td>${(b.people || [])
-                .map((p: any) =>
-                  role === 'admin'
-                    ? `<a href="#person/${p.id}">${esc(
-                        person(p.id)?.name || p.printed || '未設定'
-                      )}</a><span class="role">${esc(
-                        (p.roles || []).join('・') || '役割未設定'
-                      )}</span>`
-                    : `<span>${esc(
-                        person(p.id)?.name || p.printed || '未設定'
-                      )}</span><span class="role">${esc(
-                        (p.roles || []).join('・') || '役割未設定'
-                      )}</span>`
-                )
-                .join('<br>')}</td><td><button type="button" class="link-button" data-publisher="${
+              }</div></div></td><td>${renderCardPeopleDesktop(
+                b.people
+              )}</td><td><button type="button" class="link-button" data-publisher="${
                 b.publisher
               }">${esc(
                 publisher(b.publisher)
@@ -1183,10 +1451,7 @@ export default function YopacAppPage() {
               }">${renderCoverImg(b, '')}<div class="copy"><div class="title">${esc(
                 b.title
               )}</div>${b.subtitle ? `<div>${esc(b.subtitle)}</div>` : ''}<div>${esc(
-                (b.people || [])
-                  .map((p: any) => person(p.id)?.name || p.printed)
-                  .filter(Boolean)
-                  .join(' / ')
+                renderCardPeopleMobile(b.people)
               )}</div><div>${esc(publisher(b.publisher))}</div><div class="meta">${esc(
                 b.classification
               )} ${esc(
@@ -1197,63 +1462,40 @@ export default function YopacAppPage() {
           )
           .join('')}</div><div id="empty-results" class="empty" ${
           visible.length ? 'hidden' : ''
-        }>該当する本がありません。条件を変えてください。</div><div class="pagination"><button type="button" id="prev" ${
-          page === 1 ? 'disabled' : ''
-        }>前へ</button><span>${page} / ${pages}</span><button type="button" id="next" ${
-          page === pages ? 'disabled' : ''
-        }>次へ</button></div>`
+        }>該当する本がありません。条件を変えてください。</div>${
+          hasMoreServerBooks
+            ? `<div class="pagination"><button type="button" id="load-more" ${
+                isListSearching ? 'disabled' : ''
+              }>${isListSearching ? '読み込み中...' : 'さらに100件を読み込む'}</button></div>`
+            : ''
+        }`
 
-        if (preserveInput && $('#search')) {
-          const next = document.createElement('div')
-          next.innerHTML = markup
-          for (const selector of [
-            '.page-head .count',
-            '#output-count',
-            '.desktop-list',
-            '.mobile-list',
-            '#empty-results',
-            '.pagination',
-          ]) {
-            const current = $(selector, app)
-            const replacement = $(selector, next)
-            if (current && replacement) current.replaceWith(replacement)
-          }
-        } else {
-          app.innerHTML = markup
-        }
+        app.innerHTML = markup
 
         const search = $('#search')
-        const updateResults = () => {
-          filters.q = search.value
-          page = 1
-          listBooks(true)
-        }
-        search.oninput = updateResults
-        search.oncompositionend = updateResults
-        search.onchange = updateResults
-        search.onsearch = updateResults
+        // 1文字入力ごとの自動検索は行わず、検索ボタン（またはEnter）押下時のみDB検索を実行
         $('#quick-search').onsubmit = (e: Event) => {
           e.preventDefault()
-          updateResults()
+          filters.q = search.value
           search.blur()
+          runServerSearch({ append: false })
         }
         $('#status-filter').onchange = (e: any) => {
           filters.status = e.target.value
-          page = 1
-          listBooks()
+          runServerSearch({ append: false })
         }
         $('#sort').onchange = (e: any) => {
           filters.sort = e.target.value
-          listBooks()
+          runServerSearch({ append: false })
         }
         $('#direction').onclick = () => {
           filters.asc = !filters.asc
-          listBooks()
+          runServerSearch({ append: false })
         }
         if ($('#favorites')) {
           $('#favorites').onclick = () => {
             filters.favorite = !filters.favorite
-            listBooks()
+            runServerSearch({ append: false })
           }
         }
         $('#clear').onclick = () => {
@@ -1268,8 +1510,7 @@ export default function YopacAppPage() {
             favorite: false,
             tree: { mode: 'AND', negate: false, children: [] },
           }
-          page = 1
-          listBooks()
+          runServerSearch({ append: false })
         }
         $('#advanced').onclick = () => {
           advanced = !advanced
@@ -1278,17 +1519,11 @@ export default function YopacAppPage() {
         $('#scan').onclick = () =>
           scanISBN((s: string) => {
             filters.q = s
-            page = 1
-            listBooks()
+            runServerSearch({ append: false })
           })
         $('#class-filter').onclick = classPicker
-        $('#prev').onclick = () => {
-          page--
-          listBooks()
-        }
-        $('#next').onclick = () => {
-          page++
-          listBooks()
+        if ($('#load-more')) {
+          $('#load-more').onclick = () => runServerSearch({ append: true })
         }
         $('#csv').onclick = exportCSV
         $('#print').onclick = printList
@@ -1341,8 +1576,7 @@ export default function YopacAppPage() {
         if ($('#apply')) {
           $('#apply').onclick = () => {
             readTreeUI()
-            page = 1
-            listBooks()
+            runServerSearch({ append: false })
           }
         }
         if ($('#save-search')) {
@@ -1361,8 +1595,7 @@ export default function YopacAppPage() {
             const x = db.saved.find((s: any) => s.id === e.target.value)
             if (x) {
               filters = structuredClone(x.filters)
-              page = 1
-              listBooks()
+              runServerSearch({ append: false })
             }
           }
         }
@@ -1395,12 +1628,15 @@ export default function YopacAppPage() {
       }
 
       function goBooks() {
-        page = 1
-        if (location.hash === '#books' || location.hash === '') listBooks()
-        else location.hash = '#books'
+        if (location.hash === '#books' || location.hash === '') {
+          runServerSearch({ append: false })
+        } else {
+          location.hash = '#books'
+          runServerSearch({ append: false })
+        }
       }
 
-function classPicker() {
+      function classPicker() {
         let prefix = ''
         let nonDecimalMode = false
         function draw() {
@@ -1417,11 +1653,7 @@ function classPicker() {
                     (c: any) =>
                       `<button type="button" data-exact-class="${esc(c.code)}">${esc(
                         c.code
-                      )} ${esc(c.name)} <span class="count">${
-                        db.books.filter(
-                          (b: any) => String(b.classification || '').trim() === c.code
-                        ).length
-                      }冊</span></button>`
+                      )} ${esc(c.name)}</button>`
                   )
                   .join('') || '<p class="muted">十進分類法以外の分類が登録されていません。</p>'
               }</div>`
@@ -1470,9 +1702,7 @@ function classPicker() {
                 (c: any) =>
                   `<button type="button" data-prefix="${c}">${c} ${esc(
                     classLabel(c, c.length)
-                  )} <span class="count">${
-                    db.books.filter((b: any) => String(b.classification || '').startsWith(c)).length
-                  }冊</span></button>`
+                  )}</button>`
               )
               .join('')}</div>`
           )
@@ -1508,7 +1738,7 @@ function classPicker() {
         }
         draw()
       }
-      
+
       function download(name: string, text: string, type = 'application/json') {
         const url = URL.createObjectURL(new Blob([text], { type }))
         const a = document.createElement('a')
@@ -1648,19 +1878,20 @@ function classPicker() {
           next.books = next.books.filter((b: any) => b.id !== bookId)
           for (const b of next.books)
             b.related = (b.related || []).filter((id: string) => id !== bookId)
+          lastResults = lastResults.filter((b: any) => b.id !== bookId)
           db = next
           persist()
           closeModal()
-          page = 1
           if (location.hash === '#books') listBooks()
           else location.hash = '#books'
           notify('「' + (book.title || '書名未入力') + '」を削除しました')
         }
       }
 
- function duplicateBook(source: any) {
+      function duplicateBook(source: any) {
         const copy = structuredClone(source)
         delete copy._dbId
+        copy._detailLoaded = true
         copy.id = id()
         copy.favorite = false
         copy.cover = ''
@@ -1956,7 +2187,8 @@ function classPicker() {
         }
       }
 
-function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
+      async function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
+        await ensureWorksLoaded()
         ensureWorkFormats()
         const formatValues = db.workFormats || []
         const bookAuthors = (bookDraftObj.people || [])
@@ -2021,7 +2253,6 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
             const authorPart = (parts[1] || '').trim()
             const formatPart = (parts[2] || '').trim()
 
-            // 著者の解決（行指定があれば優先、なければ書籍著者の引き継ぎ）
             let authorNames: string[] = []
             if (authorPart) {
               authorNames = authorPart
@@ -2032,7 +2263,6 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
               authorNames = bookAuthors.map((p: any) => p.name)
             }
 
-            // 形式の解決
             let resolvedFormat = defaultFormat
             if (formatPart) {
               const matchedFmt = formatValues.find(
@@ -2041,7 +2271,6 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
               resolvedFormat = matchedFmt || formatPart
             }
 
-            // 既存作品の照合
             const titleNorm = normal(title)
             const authorNormSet = new Set(authorNames.map((n) => normal(n)))
             const matchedWork = db.works.find((w: any) => {
@@ -2148,7 +2377,6 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
                 db.workFormats.push(selectedFormat)
               }
 
-              // modalBody 内からチェックが残っている著者だけを確実に取得
               const checkedBoxes = $$(`input[data-bulk-row-author="${i}"]:checked`, modalBody)
               const selectedAuthorNames = checkedBoxes.map(
                 (cb: any) => row.authorNames[Number(cb.dataset.authorIdx)]
@@ -2200,7 +2428,8 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
         }
       }
 
-      function createRelated(type: 'person' | 'publisher' | 'work', onSelect: any) {
+      async function createRelated(type: 'person' | 'publisher' | 'work', onSelect: any) {
+        if (type === 'work') await ensureWorksLoaded()
         const config = {
           person: {
             heading: '人物・団体を新規登録',
@@ -2364,11 +2593,12 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
         )
       }
 
-      function pickRelated(
+      async function pickRelated(
         kind: 'person' | 'work' | 'publisher',
         onSelect: any,
         { exclude = [] }: { exclude?: string[] } = {}
       ) {
+        if (kind === 'work') await ensureWorksLoaded()
         const configs = {
           person: {
             label: '人物・団体',
@@ -2471,7 +2701,7 @@ function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
         draw()
       }
 
-function membersEditor(m: any[]) {
+      function membersEditor(m: any[]) {
         const list = m || []
         return `<div id="members">${list
           .map(
@@ -2505,7 +2735,7 @@ function membersEditor(m: any[]) {
             ''
           )}</div><div class="toolbar" style="margin-top:10px"><button type="button" id="add-member">＋ 登録済みの人物・団体</button><button type="button" id="new-member">＋ 人物・団体を新規登録</button></div>`
       }
-      
+
       function readMembers() {
         return $$('[data-member]').map((row) => ({
           id: $('[data-person]', row).value,
@@ -2552,7 +2782,7 @@ function membersEditor(m: any[]) {
               )
             })
         )
-$$('[data-move-member-up]').forEach(
+        $$('[data-move-member-up]').forEach(
           (e) =>
             (e.onclick = () => {
               draft.people = readMembers()
@@ -2583,12 +2813,13 @@ $$('[data-move-member-up]').forEach(
             })
         )
       }
-      
+
       let bookDraft: any = null
       function editBook(source: any) {
         bookDraft = structuredClone(
           source || {
             id: id(),
+            _detailLoaded: true,
             title: '',
             subtitle: '',
             series: '',
@@ -2633,7 +2864,6 @@ $$('[data-move-member-up]').forEach(
         }
       }
 
-      // 2. 蔵書を追加・編集画面（レイアウト整形済み）
       function drawBookForm() {
         const b = bookDraft
         const isEditing = db.books.some((x: any) => x.id === b.id)
@@ -2750,9 +2980,16 @@ $$('[data-move-member-up]').forEach(
         $('#save-book').onclick = () => {
           if (!read(true)) return
           b.modified = new Date().toISOString()
+          b._detailLoaded = true
           const i = db.books.findIndex((x: any) => x.id === b.id)
-          if (i < 0) db.books.unshift(b)
-          else db.books[i] = b
+          if (i < 0) {
+            db.books.unshift(b)
+            lastResults.unshift(b)
+          } else {
+            db.books[i] = b
+            const rIdx = lastResults.findIndex((x: any) => x.id === b.id)
+            if (rIdx >= 0) lastResults[rIdx] = b
+          }
           persist()
           location.hash = '#book/' + b.id
           notify('書籍を保存しました')
@@ -2829,14 +3066,12 @@ $$('[data-move-member-up]').forEach(
             )
           $('#publishers-results').innerHTML = `<p class="muted">${
             list.length
-          }件</p><div class="table-wrap"><table><thead><tr><th>出版者・レーベル名</th><th>よみ</th><th>登録冊数</th><th>所蔵リスト</th></tr></thead><tbody>${list
+          }件</p><div class="table-wrap"><table><thead><tr><th>出版者・レーベル名</th><th>よみ</th><th>所蔵リスト</th></tr></thead><tbody>${list
             .map(
               (p: any) =>
                 `<tr><td><a href="#publisher/${p.id}">${esc(p.name)}</a></td><td>${esc(
                   p.reading
-                )}</td><td>${
-                  db.books.filter((b: any) => b.publisher === p.id).length
-                }冊</td><td><button type="button" class="tiny" data-publisher="${
+                )}</td><td><button type="button" class="tiny" data-publisher="${
                   p.id
                 }">所蔵リストを表示</button></td></tr>`
             )
@@ -2854,7 +3089,8 @@ $$('[data-move-member-up]').forEach(
         draw()
       }
 
-      function prepareRecordDeletion(data: any, type: string, recordId: string) {
+      async function prepareRecordDeletion(data: any, type: string, recordId: string) {
+        if (type === 'works' || type === 'people') await ensureWorksLoaded()
         const next = structuredClone(data)
         const now = new Date().toISOString()
         let booksCount = 0
@@ -2896,26 +3132,27 @@ $$('[data-move-member-up]').forEach(
         return { next, books: booksCount, works: worksCount }
       }
 
-      function confirmRecordDeletion(type: 'people' | 'works' | 'publishers', recordId: string) {
+      async function confirmRecordDeletion(
+        type: 'people' | 'works' | 'publishers',
+        recordId: string
+      ) {
         const record = db[type]?.find((r: any) => r.id === recordId)
         if (!record) return
         const label = { people: '個人・団体', works: '作品', publishers: '出版者・レーベル' }[type]
         const name = record.name || record.title || '名称未入力'
-        const impact = prepareRecordDeletion(db, type, recordId)
+        const impact = await prepareRecordDeletion(db, type, recordId)
         openModal(
-          `<h2>${esc(label)}を削除</h2><p><strong>${esc(name)}</strong></p><p>関連する書籍：${
-            impact.books
-          }冊、${
+          `<h2>${esc(label)}を削除</h2><p><strong>${esc(name)}</strong></p><p>${
             type === 'works' ? '原作・翻訳として関連する作品' : '関連する作品'
           }：${
             impact.works
-          }件</p><p>この登録と、上記の書籍・作品からの関連付けを削除します。書籍そのものや他の登録情報は削除しません。${
+          }件</p><p>この登録と、書籍・作品からの関連付けを削除します。書籍そのものや他の登録情報は削除しません。${
             type === 'publishers' ? '関連書籍の出版社欄は未設定になります。' : ''
           }</p><div class="toolbar"><button type="button" id="cancel-delete-record">キャンセル</button><button type="button" id="confirm-delete-record" class="danger">この登録を削除</button></div>`
         )
         $('#cancel-delete-record').onclick = closeModal
-        $('#confirm-delete-record').onclick = () => {
-          const { next } = prepareRecordDeletion(db, type, recordId)
+        $('#confirm-delete-record').onclick = async () => {
+          const { next } = await prepareRecordDeletion(db, type, recordId)
           db = next
           persist()
           if (type === 'publishers' && filters.publisher === recordId) filters.publisher = ''
@@ -2964,9 +3201,7 @@ $$('[data-move-member-up]').forEach(
         )}${detailField(
           'よみ',
           esc(p.reading)
-        )}</div><section class="panel"><h2>関連書籍 <span class="count">${
-          relBooks.length
-        }冊</span></h2><button type="button" data-publisher="${
+        )}</div><section class="panel"><h2>関連書籍</h2><button type="button" data-publisher="${
           p.id
         }">所蔵リストを表示</button><ul class="relations">${
           relBooks
@@ -2976,7 +3211,7 @@ $$('[data-move-member-up]').forEach(
                   b.status
                 )}</span></li>`
             )
-            .join('') || '<li class="muted">該当書籍なし</li>'
+            .join('') || '<li class="muted">該当書籍なし（上のボタンからDB全体を検索できます）</li>'
         }</ul></section></div>`
         bindFilterLinks()
         $('#edit-publisher').onclick = () => editPublisher(p)
@@ -3016,7 +3251,8 @@ $$('[data-move-member-up]').forEach(
         }
       }
 
-      function personDetail(p: any) {
+      async function personDetail(p: any) {
+        await ensureWorksLoaded()
         const relBooks = db.books.filter((b: any) =>
           (b.people || []).some((x: any) => x.id === p.id)
         )
@@ -3043,9 +3279,7 @@ $$('[data-move-member-up]').forEach(
                 p.ndlId
               )}" target="_blank" rel="noopener">${esc(p.ndlId)}</a>`
             : ''
-        )}</div><div><section class="panel"><h2>関連書籍 <span class="count">${
-          relBooks.length
-        }冊</span></h2><ul class="relations">${
+        )}</div><div><section class="panel"><h2>読込済みの関連書籍</h2><ul class="relations">${
           relBooks
             .map((b: any) => {
               const m = (b.people || []).find((x: any) => x.id === p.id)
@@ -3133,7 +3367,9 @@ $$('[data-move-member-up]').forEach(
         draw()
       }
 
-      function worksList() {
+      async function worksList() {
+        app.innerHTML = '<div class="panel"><p>作品データを読み込み中…</p></div>'
+        await ensureWorksLoaded()
         app.innerHTML = `<div class="page-head"><div><h1>作品</h1><div class="count">${db.works.length}件</div></div><button type="button" class="primary" id="new-work">＋ 作品を追加</button></div><div class="toolbar"><input type="search" id="works-search" placeholder="作品名・著作者・形式で検索" aria-label="作品検索"></div><div id="works-results"></div>`
         function draw() {
           const q = normal($('#works-search').value)
@@ -3141,6 +3377,7 @@ $$('[data-move-member-up]').forEach(
             normal(w.title + ' ' + memberships(w.people) + ' ' + w.format).includes(q)
           )
           $('#works-results').innerHTML = `<div class="table-wrap"><table><thead><tr><th>作品名</th><th>著作者など</th><th>形式</th><th>初出誌</th></tr></thead><tbody>${a
+            .slice(0, 200)
             .map(
               (w: any) =>
                 `<tr><td><a href="#work/${w.id}">${esc(w.title)}</a></td><td>${(w.people || [])
@@ -3154,7 +3391,8 @@ $$('[data-move-member-up]').forEach(
         draw()
       }
 
-      function workDetail(w: any) {
+      async function workDetail(w: any) {
+        await ensureWorksLoaded()
         const relBooks = db.books.filter((b: any) => (b.works || []).includes(w.id))
         const translations = [
           ...new Set([
@@ -3178,9 +3416,7 @@ $$('[data-move-member-up]').forEach(
         )}${detailField(
           '原作タイトル',
           esc(w.originalTitle)
-        )}</section><section><div class="panel"><h2>収録先 <span class="count">${
-          relBooks.length
-        }冊</span></h2><ul class="relations">${
+        )}</section><section><div class="panel"><h2>収録先</h2><ul class="relations">${
           relBooks
             .map((b: any) => `<li><a href="#book/${b.id}">${esc(b.title)}</a></li>`)
             .join('') || '<li>該当なし</li>'
@@ -3193,7 +3429,8 @@ $$('[data-move-member-up]').forEach(
         $('#delete-work').onclick = () => confirmRecordDeletion('works', w.id)
       }
 
-      function editWork(source: any) {
+      async function editWork(source: any) {
+        await ensureWorksLoaded()
         const w = structuredClone(
           source || {
             id: id(),
@@ -3343,9 +3580,7 @@ $$('[data-move-member-up]').forEach(
                 if (name === '未設定') return notify('「未設定」は残してください')
                 const affected = db.books.filter((b: any) => b.status === name)
                 openModal(
-                  `<h2>状態「${esc(name)}」を削除</h2><p>使用中：${
-                    affected.length
-                  }冊。変更先を選択してください。</p><select id="replacement">${opts(
+                  `<h2>状態「${esc(name)}」を削除</h2><p>変更先を選択してください。</p><select id="replacement">${opts(
                     db.statuses.filter((n: string) => n !== name),
                     '未設定'
                   )}</select> <button type="button" class="danger" id="confirm-delete-status">変更して削除</button>`
@@ -3375,7 +3610,6 @@ $$('[data-move-member-up]').forEach(
         )
       }
 
-      // JSZipをCDNから読み込んで書影ZIPまたはJPG群をSupabase Storage `covers` バケットへアップロードする
       async function uploadCoverFiles(files: FileList, statusEl: HTMLElement) {
         const list = Array.from(files)
         let uploaded = 0
@@ -3424,7 +3658,8 @@ $$('[data-move-member-up]').forEach(
         }`
       }
 
-      function settings() {
+      async function settings() {
+        await ensureWorksLoaded()
         ensureWorkFormats()
         app.innerHTML = `<div class="page-head"><h1>管理</h1></div><div class="cards"><section class="panel"><h2>役割ラベル</h2><div id="role-management"></div><div class="toolbar"><input id="new-role" aria-label="新しい役割"><button type="button" id="add-role">追加</button></div></section><section class="panel"><h2>状態の種類</h2><div id="status-management"></div><div class="toolbar"><input id="new-status" aria-label="新しい状態"><button type="button" id="add-status">追加</button></div></section><section class="panel"><h2>作品の形式</h2><div id="format-management"></div><div class="toolbar"><input id="new-format" aria-label="新しい作品の形式"><button type="button" id="add-format">追加</button></div></section></div><section class="panel"><h2>書影（表紙画像）の一括取込</h2><p class="muted">お手元の書影ZIPファイル（<code>YOPAC_書影_001.zip</code> など複数選択可）または展開済みのJPG画像を選択すると、Supabase Storage（<code>covers</code>バケット）へ一括保存され、全蔵書の書影が表示されます。</p><div class="toolbar"><label class="button primary">書影ZIP / 画像ファイルを選択して取込<input id="cover-batch-input" type="file" accept=".zip,image/*" multiple hidden></label></div><p id="image-import-status" class="muted" role="status"></p></section><section class="panel"><h2>保存した検索</h2>${
           db.saved
@@ -3478,7 +3713,6 @@ $$('[data-move-member-up]').forEach(
         )
       }
 
-      // 1. ワンステップで即座にその場でカメラ起動するISBNスキャナ
       async function scanISBN(done: any, { lookup = false }: { lookup?: boolean } = {}) {
         openModal(
           `<h2>ISBNバーコード読取</h2><p id="scanner-message" class="muted" role="status">カメラを起動しています。本のバーコード（978〜）をかざしてください…</p><video id="scanner-video" playsinline muted></video><div class="toolbar"><label class="button secondary">写真・画像から読取<input id="barcode-photo" type="file" accept="image/*" capture="environment" hidden></label><input id="manual-isbn" aria-label="ISBN" placeholder="またはISBNを直接入力" inputmode="numeric" style="flex:1"><button type="button" id="use-isbn" class="primary">${
@@ -3554,7 +3788,6 @@ $$('[data-move-member-up]').forEach(
           }
         }
 
-        // モーダルを開いた瞬間に自動でカメラ読取を開始（余分なボタンクリック不要）
         try {
           zxingReader = await loadZXing()
           if (stopped) return
@@ -3582,7 +3815,7 @@ $$('[data-move-member-up]').forEach(
         if (!res.ok) throw Error('NDL応答：HTTP ' + res.status)
         return await res.text()
       }
-      
+
       async function loadXML(url: string) {
         const text = await fetchNdlViaProxy(url)
         const xml = new DOMParser().parseFromString(text, 'application/xml')
@@ -3615,7 +3848,6 @@ $$('[data-move-member-up]').forEach(
         return [...new Set(structured.length ? structured : fallback)]
       }
 
-// OpenBD / Google Books 優先 ＋ NDL フォールバックで書誌情報を一括取得
       async function lookupBook(isbn: string, draft: any, redraw: any) {
         isbn = isbnClean(isbn)
         if (!validISBN(isbn)) return notify('有効なISBNを入力してください')
@@ -3627,7 +3859,6 @@ $$('[data-move-member-up]').forEach(
         let ndlErrorMsg = ''
 
         try {
-          // 1. OpenBD API（日本の書籍の多くをカバー・レート制限なし・超高速）
           try {
             const obdRes = await fetch(`https://api.openbd.jp/v1/get?isbn=${isbn}`)
             if (obdRes.ok) {
@@ -3641,12 +3872,10 @@ $$('[data-move-member-up]').forEach(
                 const jpy = prices.find((p: any) => p.CurrencyCode === 'JPY') || prices[0]
                 const price = jpy?.PriceAmount ? String(jpy.PriceAmount).replace(/[^\d]/g, '') : ''
 
-                // ONIX内のNDC分類コード抽出
                 const subjects = onix?.DescriptiveDetail?.Subject || []
                 const ndcSubj = subjects.find((s: any) => s.SubjectSchemeIdentifier === '78')
                 const classification = ndcSubj?.SubjectCode || ''
 
-                // 著者名の整形（「東野, 圭吾」→「東野 圭吾」）
                 const rawAuthors = item.summary.author
                   ? String(item.summary.author)
                       .split(/[／/]/)
@@ -3671,7 +3900,6 @@ $$('[data-move-member-up]').forEach(
             }
           } catch {}
 
-          // 2. Google Books API（OpenBDにない本や洋書もカバー）
           if (candidates.length === 0) {
             try {
               const gbRes = await fetch(
@@ -3699,7 +3927,6 @@ $$('[data-move-member-up]').forEach(
             } catch {}
           }
 
-          // 3. OpenBD / Google Books で見つからない場合のみ NDL API に問い合わせる
           if (candidates.length === 0) {
             try {
               const query = 'isbn="' + isbn + '"'
@@ -3836,7 +4063,7 @@ $$('[data-move-member-up]').forEach(
           )
         }
       }
-      
+
       async function lookupAuthorityById(draft: any, redraw: any, provided?: string) {
         const n =
           provided ??
@@ -3940,7 +4167,7 @@ $$('[data-move-member-up]').forEach(
           '<div class="panel"><h1>登録が見つかりません</h1><a href="#books">所蔵リストへ戻る</a></div>'
       }
 
-      function route() {
+      async function route() {
         closeModal()
         window.scrollTo(0, 0)
         if (role === 'viewer') {
@@ -3963,29 +4190,32 @@ $$('[data-move-member-up]').forEach(
             break
           case 'person': {
             const p = person(key)
-            p ? personDetail(p) : notFound()
+            p ? await personDetail(p) : notFound()
             break
           }
           case 'works':
-            worksList()
+            await worksList()
             break
           case 'work': {
+            await ensureWorksLoaded()
             const w = work(key)
-            w ? workDetail(w) : notFound()
+            w ? await workDetail(w) : notFound()
             break
           }
           case 'settings':
-            settings()
+            await settings()
             break
           case 'book':
             if (key === 'new') editBook(null)
             else {
-              const b = db.books.find((x: any) => x.id === key)
+              app.innerHTML = '<div class="panel"><p>書籍の詳細を読み込み中…</p></div>'
+              const b = await ensureBookDetailLoaded(key)
               b ? bookDetail(b) : notFound()
             }
             break
           case 'edit-book': {
-            const b = db.books.find((x: any) => x.id === key)
+            app.innerHTML = '<div class="panel"><p>編集データを読み込み中…</p></div>'
+            const b = await ensureBookDetailLoaded(key)
             b ? editBook(b) : notFound()
             break
           }

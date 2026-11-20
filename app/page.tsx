@@ -1213,7 +1213,7 @@ export default function YopacAppPage() {
         }
       }
 
-      // 検索ボタン・条件変更時に Supabase（DB）へ直接問い合わせる
+      // 検索ボタン・条件変更時に Supabase（DB）全体へ直接問い合わせる
       async function runServerSearch({ append = false }: { append?: boolean } = {}) {
         isListSearching = true
         saveStateLabel('検索中…')
@@ -1224,7 +1224,10 @@ export default function YopacAppPage() {
             filters.tree?.children && filters.tree.children.length > 0
           )
           const needsFullForRules =
-            hasAdvancedRules || filters.favorite || filters.sort === 'price' || filters.sort === 'purchasePrice'
+            hasAdvancedRules ||
+            filters.favorite ||
+            filters.sort === 'price' ||
+            filters.sort === 'purchasePrice'
           const cols = needsFullForRules ? '*' : ITEM_LIST_COLUMNS
 
           let query = supabase.from('items').select(cols)
@@ -1239,9 +1242,44 @@ export default function YopacAppPage() {
             const safeKw = kw.replace(/[,%()]/g, ' ').trim()
             if (safeKw) {
               const pat = `%${safeKw}%`
-              query = query.or(
-                `title.ilike.${pat},subtitle.ilike.${pat},series.ilike.${pat},volume.ilike.${pat},author.ilike.${pat},publisher.ilike.${pat},isbn.ilike.${pat}`
-              )
+              const orParts = [
+                `title.ilike.${pat}`,
+                `subtitle.ilike.${pat}`,
+                `series.ilike.${pat}`,
+                `volume.ilike.${pat}`,
+                `author.ilike.${pat}`,
+                `publisher.ilike.${pat}`,
+                `isbn.ilike.${pat}`,
+              ]
+
+              // ハイフン・スペース区切りのISBNでもヒットさせる
+              const cleanIsbn = isbnClean(safeKw)
+              if (cleanIsbn && cleanIsbn !== safeKw) {
+                orParts.push(`isbn.ilike.%${cleanIsbn}%`)
+              }
+
+              // スペースの有無・よみ・別名を無視して人物マスタから一致するIDを引き、people_json を横断検索
+              const normKw = normal(safeKw)
+              const matchedPersonIds = db.people
+                .filter((p: any) => normal(personText(p)).includes(normKw))
+                .slice(0, 15)
+                .map((p: any) => p.id)
+              for (const pid of matchedPersonIds) {
+                orParts.push(`people_json.ilike.%${pid}%`)
+              }
+
+              // 出版社マスタ（名称・よみ）から一致するIDを引き、publisher_id でもヒットさせる
+              const matchedPubIds = db.publishers
+                .filter((p: any) =>
+                  normal(p.name + ' ' + (p.reading || '')).includes(normKw)
+                )
+                .slice(0, 10)
+                .map((p: any) => p.id)
+              for (const pubId of matchedPubIds) {
+                orParts.push(`publisher_id.eq.${pubId}`)
+              }
+
+              query = query.or(orParts.join(','))
             }
           }
 
@@ -1352,8 +1390,8 @@ export default function YopacAppPage() {
         const visible = lastResults
         const activeFilter = hasActiveServerFilters()
         const countText = `${activeFilter ? '検索結果：' : '最新登録：'}${visible.length}冊${
-          filters.series ? ' · ' + esc(filters.series) : ''
-        }${
+          hasMoreServerBooks ? '（上位100件表示中）' : ''
+        }${filters.series ? ' · ' + esc(filters.series) : ''}${
           filters.cls
             ? ' · ' + esc(filters.cls) + ' ' + esc(classLabel(filters.cls, filters.cls.length))
             : ''

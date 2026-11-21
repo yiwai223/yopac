@@ -493,6 +493,7 @@ export default function YopacAppPage() {
       let hasMoreServerBooks = rawItems.length >= LIST_PAGE_SIZE
       let serverOffset = rawItems.length
       let isListSearching = false
+      let searchTotalCount: number | null = null
 
       // 書影署名付きURLキャッシュ（createSignedUrls で一括取得）
       const signedCoverUrlMap = new Map<string, string>()
@@ -1230,7 +1231,10 @@ export default function YopacAppPage() {
             filters.sort === 'purchasePrice'
           const cols = needsFullForRules ? '*' : ITEM_LIST_COLUMNS
 
-          let query = supabase.from('items').select(cols)
+          const activeFilter = hasActiveServerFilters()
+          let query = activeFilter
+            ? supabase.from('items').select(cols, { count: 'exact' })
+            : supabase.from('items').select(cols)
 
           if (filters.publisher) query = query.eq('publisher_id', filters.publisher)
           if (filters.status) query = query.eq('status', filters.status)
@@ -1283,11 +1287,15 @@ export default function YopacAppPage() {
             }
           }
 
-          const { data, error } = await query
+          const { data, count, error } = await query
             .order(sortColumnName(filters.sort), { ascending: filters.asc })
             .range(offset, offset + LIST_PAGE_SIZE - 1)
 
           if (error) throw error
+
+          const hasClientOnlyFilter = hasAdvancedRules || filters.favorite
+          searchTotalCount =
+            activeFilter && !hasClientOnlyFilter && typeof count === 'number' ? count : null
 
           const rows: any[] = ((data as any[]) || []).filter((r: any) => !r.deleted_at)
           const mapped = rows.map((r: any) => mapBookRow(r, needsFullForRules))
@@ -1389,9 +1397,20 @@ export default function YopacAppPage() {
       function listBooks() {
         const visible = lastResults
         const activeFilter = hasActiveServerFilters()
-        const countText = `${activeFilter ? '検索結果：' : '最新登録：'}${visible.length}冊${
-          hasMoreServerBooks ? '（上位100件表示中）' : ''
-        }${filters.series ? ' · ' + esc(filters.series) : ''}${
+        let countHeader = `最新登録：${visible.length}冊`
+        if (activeFilter) {
+          if (searchTotalCount !== null) {
+            countHeader =
+              searchTotalCount > visible.length
+                ? `検索結果：${searchTotalCount}冊（上位${visible.length}件表示中）`
+                : `検索結果：${searchTotalCount}冊`
+          } else {
+            countHeader = `検索結果：${visible.length}冊${
+              hasMoreServerBooks ? `（上位${visible.length}件表示中）` : ''
+            }`
+          }
+        }
+        const countText = `${countHeader}${filters.series ? ' · ' + esc(filters.series) : ''}${
           filters.cls
             ? ' · ' + esc(filters.cls) + ' ' + esc(classLabel(filters.cls, filters.cls.length))
             : ''

@@ -253,29 +253,19 @@ export default function YopacAppPage() {
       const syncEl = document.getElementById('sync-status')
       if (syncEl) syncEl.textContent = 'データを読み込み中…'
 
-      // 起動時は items を最新100件・最小カラムのみ取得し、works は遅延読み込みする
-      const [initialItemsRes, rawPeople, rawPublishers, rawCategories, rawSettings] =
-        await Promise.all([
-          supabase
-            .from('items')
-            .select(ITEM_LIST_COLUMNS)
-            .order('created_at', { ascending: false })
-            .range(0, LIST_PAGE_SIZE - 1),
-          fetchAll(
-            'people',
-            'id',
-            true,
-            'id,record_id,name,reading,description,url,original_name,aliases_json,ndl_id'
-          ),
-          fetchAll('publishers', 'id', true, 'id,record_id,name,reading,labels_json'),
-          fetchAll('categories', 'code', true, 'id,record_id,code,name'),
-          supabase.from('settings').select('*'),
-        ])
-
-      if (initialItemsRes.error) {
-        console.error('Fetch error on initial items:', initialItemsRes.error)
-      }
-      const rawItems: any[] = (initialItemsRes.data as any[]) || []
+      // 起動時はマスタ（人物・出版社・分類・設定）のみ取得し、蔵書リストは検索実行時まで取得しない
+      const [rawPeople, rawPublishers, rawCategories, rawSettings] = await Promise.all([
+        fetchAll(
+          'people',
+          'id',
+          true,
+          'id,record_id,name,reading,description,url,original_name,aliases_json,ndl_id'
+        ),
+        fetchAll('publishers', 'id', true, 'id,record_id,name,reading,labels_json'),
+        fetchAll('categories', 'code', true, 'id,record_id,code,name'),
+        supabase.from('settings').select('*'),
+      ])
+      const rawItems: any[] = []
 
       // 1. 分類 (classes)
       const classes = rawCategories
@@ -490,10 +480,12 @@ export default function YopacAppPage() {
       let saveBlocked = false
       let worksLoaded = false
       let worksLoadingPromise: Promise<void> | null = null
-      let hasMoreServerBooks = rawItems.length >= LIST_PAGE_SIZE
-      let serverOffset = rawItems.length
+      let hasMoreServerBooks = false
+      let serverOffset = 0
       let isListSearching = false
+      let hasSearched = false
       let searchTotalCount: number | null = null
+      let advancedAllMatches: any[] = []
 
       // 書影署名付きURLキャッシュ（createSignedUrls で一括取得）
       const signedCoverUrlMap = new Map<string, string>()
@@ -1214,27 +1206,75 @@ export default function YopacAppPage() {
         }
       }
 
-      // 検索ボタン・条件変更時に Supabase（DB）全体へ直接問い合わせる
+      function treeHasWorkField(g: any): boolean {
+        if (!g) return false
+        if (g.field === 'work') return true
+        return Array.isArray(g.children) && g.children.some(treeHasWorkField)
+      }
+
+      // 簡易検索または詳細検索（現在表示中のモードの条件のみ）で Supabase へ問い合わせる
       async function runServerSearch({ append = false }: { append?: boolean } = {}) {
         isListSearching = true
+        hasSearched = true
         saveStateLabel('検索中…')
-        const offset = append ? serverOffset : 0
 
         try {
-          const hasAdvancedRules = Boolean(
-            filters.tree?.children && filters.tree.children.length > 0
-          )
-          const needsFullForRules =
-            hasAdvancedRules ||
+          if (advanced) {
+            // 詳細検索モード：簡易検索の条件は使わず、filters.tree のみで検索する
+            if (append) {
+              const nextSlice = advancedAllMatches.slice(
+                lastResults.length,
+                lastResults.length + LIST_PAGE_SIZE
+              )
+              await resolveCoverUrlsBatch(nextSlice)
+              lastResults = [...lastResults, ...nextSlice]
+              hasMoreServerBooks = lastResults.length < advancedAllMatches.length
+              saveStateLabel('読み込み済み')
+              return
+            }
+
+            if (treeHasWorkField(filters.tree)) {
+              await ensureWorksLoaded()
+            }
+
+            const rawAll = await fetchAll(
+              'items',
+              sortColumnName(filters.sort),
+              filters.asc,
+              '*'
+            )
+            const mappedAll = rawAll
+              .filter((r: any) => !r.deleted_at)
+              .map((r: any) => mapBookRow(r, true))
+            advancedAllMatches = mappedAll.filter((b: any) => evaluate(b, filters.tree))
+            searchTotalCount = advancedAllMatches.length
+
+            const firstPage = advancedAllMatches.slice(0, LIST_PAGE_SIZE)
+            await resolveCoverUrlsBatch(firstPage)
+            syncBooksIntoConfirmed(firstPage)
+            if (!pendingTarget && !saveRunning) {
+              for (const b of firstPage) {
+                const idx = db.books.findIndex((x: any) => x.id === b.id)
+                if (idx < 0) db.books.push(b)
+                else if (!db.books[idx]._detailLoaded) db.books[idx] = b
+              }
+            }
+            lastResults = firstPage
+            hasMoreServerBooks = advancedAllMatches.length > firstPage.length
+            serverOffset = firstPage.length
+            saveStateLabel('読み込み済み')
+            return
+          }
+
+          // 簡易検索モード：詳細検索（filters.tree）は使わず、簡易検索の条件のみで検索する
+          const offset = append ? serverOffset : 0
+          const needsFull =
             filters.favorite ||
             filters.sort === 'price' ||
             filters.sort === 'purchasePrice'
-          const cols = needsFullForRules ? '*' : ITEM_LIST_COLUMNS
+          const cols = needsFull ? '*' : ITEM_LIST_COLUMNS
 
-          const activeFilter = hasActiveServerFilters()
-          let query = activeFilter
-            ? supabase.from('items').select(cols, { count: 'exact' })
-            : supabase.from('items').select(cols)
+          let query = supabase.from('items').select(cols, { count: 'exact' })
 
           if (filters.publisher) query = query.eq('publisher_id', filters.publisher)
           if (filters.status) query = query.eq('status', filters.status)
@@ -1256,13 +1296,11 @@ export default function YopacAppPage() {
                 `isbn.ilike.${pat}`,
               ]
 
-              // ハイフン・スペース区切りのISBNでもヒットさせる
               const cleanIsbn = isbnClean(safeKw)
               if (cleanIsbn && cleanIsbn !== safeKw) {
                 orParts.push(`isbn.ilike.%${cleanIsbn}%`)
               }
 
-              // スペースの有無・よみ・別名を無視して人物マスタから一致するIDを引き、people_json を横断検索
               const normKw = normal(safeKw)
               const matchedPersonIds = db.people
                 .filter((p: any) => normal(personText(p)).includes(normKw))
@@ -1272,7 +1310,6 @@ export default function YopacAppPage() {
                 orParts.push(`people_json.ilike.%${pid}%`)
               }
 
-              // 出版社マスタ（名称・よみ）から一致するIDを引き、publisher_id でもヒットさせる
               const matchedPubIds = db.publishers
                 .filter((p: any) =>
                   normal(p.name + ' ' + (p.reading || '')).includes(normKw)
@@ -1293,21 +1330,17 @@ export default function YopacAppPage() {
 
           if (error) throw error
 
-          const hasClientOnlyFilter = hasAdvancedRules || filters.favorite
-          searchTotalCount =
-            activeFilter && !hasClientOnlyFilter && typeof count === 'number' ? count : null
+          searchTotalCount = !filters.favorite && typeof count === 'number' ? count : null
 
           const rows: any[] = ((data as any[]) || []).filter((r: any) => !r.deleted_at)
-          const mapped = rows.map((r: any) => mapBookRow(r, needsFullForRules))
+          const mapped = rows.map((r: any) => mapBookRow(r, needsFull))
           await resolveCoverUrlsBatch(mapped)
           syncBooksIntoConfirmed(mapped)
 
           hasMoreServerBooks = rows.length >= LIST_PAGE_SIZE
           serverOffset = offset + rows.length
 
-          const filtered = mapped.filter(
-            (b: any) => (!filters.favorite || b.favorite) && evaluate(b, filters.tree)
-          )
+          const filtered = mapped.filter((b: any) => !filters.favorite || b.favorite)
 
           if (append) {
             const existingIds = new Set(lastResults.map((b: any) => b.id))
@@ -1317,7 +1350,6 @@ export default function YopacAppPage() {
             }
           } else {
             lastResults = filtered
-            // 未保存の変更がない場合のみ検索結果をキャッシュへ反映
             if (!pendingTarget && !saveRunning) {
               for (const b of mapped) {
                 const idx = db.books.findIndex((x: any) => x.id === b.id)
@@ -1336,7 +1368,6 @@ export default function YopacAppPage() {
           listBooks()
         }
       }
-
       function ruleHTML(g: any, path = ''): string {
         if (g.field)
           return `<div class="rule" data-path="${path}"><select data-field aria-label="検索項目">${Object.entries(
@@ -1394,42 +1425,148 @@ export default function YopacAppPage() {
         $$('#conditions [data-path]').forEach(walk)
       }
 
+      function resetAllFilters() {
+        filters = {
+          q: '',
+          publisher: '',
+          status: '',
+          series: '',
+          cls: '',
+          sort: 'registered',
+          asc: false,
+          favorite: false,
+          tree: { mode: 'AND', negate: false, children: [] },
+        }
+        hasSearched = false
+        lastResults = []
+        advancedAllMatches = []
+        searchTotalCount = null
+        hasMoreServerBooks = false
+        serverOffset = 0
+        listBooks()
+      }
+
       function listBooks() {
-        const visible = lastResults
-        const activeFilter = hasActiveServerFilters()
-        let countHeader = `最新登録：${visible.length}冊`
-        if (activeFilter) {
+        const visible = hasSearched ? lastResults : []
+        let countText = ''
+        if (hasSearched) {
+          let countHeader = `検索結果：${visible.length}冊`
           if (searchTotalCount !== null) {
             countHeader =
               searchTotalCount > visible.length
                 ? `検索結果：${searchTotalCount}冊（上位${visible.length}件表示中）`
                 : `検索結果：${searchTotalCount}冊`
-          } else {
-            countHeader = `検索結果：${visible.length}冊${
-              hasMoreServerBooks ? `（上位${visible.length}件表示中）` : ''
-            }`
+          } else if (hasMoreServerBooks) {
+            countHeader = `検索結果：${visible.length}冊（上位${visible.length}件表示中）`
           }
+          countText = `${countHeader}${
+            !advanced && filters.series ? ' · ' + esc(filters.series) : ''
+          }${
+            !advanced && filters.cls
+              ? ' · ' + esc(filters.cls) + ' ' + esc(classLabel(filters.cls, filters.cls.length))
+              : ''
+          }`
         }
-        const countText = `${countHeader}${filters.series ? ' · ' + esc(filters.series) : ''}${
-          filters.cls
-            ? ' · ' + esc(filters.cls) + ' ' + esc(classLabel(filters.cls, filters.cls.length))
-            : ''
-        }`
 
-        const markup = `<div class="page-head"><div><h1>所蔵リスト</h1><div class="count">${countText}</div></div>${
+        const resultsMarkup = hasSearched
+          ? `<div class="desktop-list table-wrap"><table><thead><tr><th>題名</th><th>著者等</th><th>出版社</th><th>分類・主題分野</th><th>状態</th></tr></thead><tbody>${visible
+              .map(
+                (b: any) =>
+                  `<tr><td><div class="thumb-cell">${
+                    b.cover || b.isbn
+                      ? `<a href="${role === 'admin' ? `#book/${b.id}` : '#books'}">${renderCoverImg(
+                          b,
+                          'list-thumb'
+                        )}</a>`
+                      : ''
+                  }<div>${
+                    role === 'admin'
+                      ? `<a class="title" href="#book/${b.id}">${esc(b.title) || '（書名未入力）'}</a>`
+                      : `<span class="title">${esc(b.title) || '（書名未入力）'}</span>`
+                  }${
+                    b.subtitle && !b.series ? `<div class="muted">${esc(b.subtitle)}</div>` : ''
+                  }${
+                    b.series
+                      ? `<div><button type="button" class="link-button tiny" data-series="${esc(
+                          b.series
+                        )}">${esc(b.series)}</button> ${esc(b.volume)}</div>`
+                      : b.volume
+                      ? `<div class="muted">${esc(b.volume)}</div>`
+                      : ''
+                  }</div></div></td><td>${renderCardPeopleDesktop(
+                    b.people
+                  )}</td><td><button type="button" class="link-button" data-publisher="${
+                    b.publisher
+                  }">${esc(
+                    publisher(b.publisher)
+                  )}</button></td><td><button type="button" class="link-button" data-class="${esc(
+                    String(b.classification || '').slice(0, 3)
+                  )}">${esc(b.classification)}</button><div class="muted">${esc(
+                    className(b.classification)
+                  )}</div></td><td><span class="badge">${esc(b.status)}</span></td></tr>`
+              )
+              .join('')}</tbody></table></div><div class="mobile-list">${visible
+              .map(
+                (b: any) =>
+                  `<a class="book-card" href="${
+                    role === 'admin' ? `#book/${b.id}` : '#books'
+                  }">${renderCoverImg(b, '')}<div class="copy"><div class="title">${esc(
+                    b.title
+                  )}</div>${b.subtitle ? `<div>${esc(b.subtitle)}</div>` : ''}<div>${esc(
+                    renderCardPeopleMobile(b.people)
+                  )}</div><div>${esc(publisher(b.publisher))}</div><div class="meta">${esc(
+                    b.classification
+                  )} ${esc(
+                    className(b.classification)
+                  )}</div><div class="meta"><span class="badge">${esc(
+                    b.status
+                  )}</span></div></div><span>›</span></a>`
+              )
+              .join('')}</div><div id="empty-results" class="empty" ${
+              visible.length ? 'hidden' : ''
+            }>該当する本がありません。条件を変えてください。</div>${
+              hasMoreServerBooks
+                ? `<div class="pagination"><button type="button" id="load-more" ${
+                    isListSearching ? 'disabled' : ''
+                  }>${isListSearching ? '読み込み中...' : 'さらに100件を読み込む'}</button></div>`
+                : ''
+            }`
+          : ''
+
+        const markup = `<div class="page-head"><div><h1>所蔵リスト</h1>${
+          countText ? `<div class="count">${countText}</div>` : ''
+        }</div>${
           role === 'admin' ? '<a class="button primary" href="#book/new">＋ 蔵書追加</a>' : ''
-        }</div><form class="toolbar" id="quick-search" role="search"><input type="search" id="search" aria-label="蔵書検索" enterkeyhint="search" autocomplete="off" placeholder="書名・著者名・シリーズ・出版社・ISBNで検索" value="${esc(
+        }</div><div id="simple-search-area" ${
+          advanced ? 'hidden' : ''
+        }><form class="toolbar" id="quick-search" role="search"><input type="search" id="search" aria-label="蔵書検索" enterkeyhint="search" autocomplete="off" placeholder="書名・著者名・シリーズ・出版社・ISBNで検索" value="${esc(
           filters.q
         )}"><button type="submit" class="primary" id="run-search" ${
           isListSearching ? 'disabled' : ''
-        }>${isListSearching ? '検索中...' : '検索'}</button><button type="button" id="scan">ISBN読取</button><button type="button" id="advanced" class="${
-          advanced ? 'secondary' : ''
-        }">詳細検索</button></form><div class="toolbar"><select id="status-filter" aria-label="状態"><option value="">すべての状態</option>${opts(
+        }>${isListSearching ? '検索中...' : '検索'}</button><button type="button" id="scan">ISBN読取</button><button type="button" id="clear">条件解除</button></form><div class="toolbar"><select id="status-filter" aria-label="状態"><option value="">すべての状態</option>${opts(
           db.statuses,
           filters.status
         )}</select><button type="button" id="class-filter">分類から選ぶ${
           filters.cls ? '：' + esc(filters.cls) : ''
-        }</button><select id="sort" aria-label="並び順">${opts(
+        }</button>${
+          role === 'admin'
+            ? `<button type="button" id="favorites">${filters.favorite ? '★' : '☆'} お気に入り</button>`
+            : ''
+        }</div></div><div class="toolbar"><button type="button" id="advanced" class="${
+          advanced ? 'secondary' : ''
+        }">${advanced ? '簡易検索へ' : '詳細検索へ'}</button></div><section id="advanced-panel" class="panel" ${
+          advanced ? '' : 'hidden'
+        }><h2>詳細検索</h2><div class="muted">日付は YYYY-MM-DD、価格は円。人物の役割は書籍に付けたラベルを検索します。</div><div id="conditions">${ruleHTML(
+          filters.tree
+        )}</div><div class="toolbar"><button type="button" class="primary" id="apply" ${
+          isListSearching ? 'disabled' : ''
+        }>${isListSearching ? '検索中...' : 'この条件で検索'}</button><button type="button" id="clear-advanced">条件解除</button>${
+          role === 'admin'
+            ? `<input id="search-name" placeholder="条件の保存名" aria-label="検索条件名"><button type="button" id="save-search">条件を保存</button><select id="load-search" aria-label="保存検索"><option value="">保存した条件</option>${opts(
+                db.saved.map((x: any) => ({ id: x.id, name: x.name }))
+              )}</select>`
+            : ''
+        }</div></section><div class="toolbar no-print"><select id="sort" aria-label="並び順">${opts(
           Object.entries({
             registered: '登録日順',
             modified: '変更日順',
@@ -1443,106 +1580,34 @@ export default function YopacAppPage() {
           filters.sort
         )}</select><button type="button" id="direction">${
           filters.asc ? '↑ 昇順' : '↓ 降順'
-        }</button>${
-          role === 'admin'
-            ? `<button type="button" id="favorites">${filters.favorite ? '★' : '☆'} お気に入り</button>`
-            : ''
-        }<button type="button" id="clear">条件解除</button></div><section id="advanced-panel" class="panel" ${
-          advanced ? '' : 'hidden'
-        }><h2>詳細検索</h2><div class="muted">日付は YYYY-MM-DD、価格は円。人物の役割は書籍に付けたラベルを検索します。</div><div id="conditions">${ruleHTML(
-          filters.tree
-        )}</div><div class="toolbar"><button type="button" class="primary" id="apply">この条件で検索</button>${
-          role === 'admin'
-            ? `<input id="search-name" placeholder="条件の保存名" aria-label="検索条件名"><button type="button" id="save-search">条件を保存</button><select id="load-search" aria-label="保存検索"><option value="">保存した条件</option>${opts(
-                db.saved.map((x: any) => ({ id: x.id, name: x.name }))
-              )}</select>`
-            : ''
-        }</div></section><div class="toolbar no-print"><button type="button" id="csv">CSV出力</button><button type="button" id="print">印刷・PDF保存</button><span class="muted" id="output-count">表示中の${
-          visible.length
-        }冊を出力</span></div><div class="desktop-list table-wrap"><table><thead><tr><th>題名</th><th>著者等</th><th>出版社</th><th>分類・主題分野</th><th>状態</th></tr></thead><tbody>${visible
-          .map(
-            (b: any) =>
-              `<tr><td><div class="thumb-cell">${
-                b.cover || b.isbn
-                  ? `<a href="${role === 'admin' ? `#book/${b.id}` : '#books'}">${renderCoverImg(
-                      b,
-                      'list-thumb'
-                    )}</a>`
-                  : ''
-              }<div>${
-                role === 'admin'
-                  ? `<a class="title" href="#book/${b.id}">${esc(b.title) || '（書名未入力）'}</a>`
-                  : `<span class="title">${esc(b.title) || '（書名未入力）'}</span>`
-              }${
-                b.subtitle && !b.series ? `<div class="muted">${esc(b.subtitle)}</div>` : ''
-              }${
-                b.series
-                  ? `<div><button type="button" class="link-button tiny" data-series="${esc(
-                      b.series
-                    )}">${esc(b.series)}</button> ${esc(b.volume)}</div>`
-                  : b.volume
-                  ? `<div class="muted">${esc(b.volume)}</div>`
-                  : ''
-              }</div></div></td><td>${renderCardPeopleDesktop(
-                b.people
-              )}</td><td><button type="button" class="link-button" data-publisher="${
-                b.publisher
-              }">${esc(
-                publisher(b.publisher)
-              )}</button></td><td><button type="button" class="link-button" data-class="${esc(
-                String(b.classification || '').slice(0, 3)
-              )}">${esc(b.classification)}</button><div class="muted">${esc(
-                className(b.classification)
-              )}</div></td><td><span class="badge">${esc(b.status)}</span></td></tr>`
-          )
-          .join('')}</tbody></table></div><div class="mobile-list">${visible
-          .map(
-            (b: any) =>
-              `<a class="book-card" href="${
-                role === 'admin' ? `#book/${b.id}` : '#books'
-              }">${renderCoverImg(b, '')}<div class="copy"><div class="title">${esc(
-                b.title
-              )}</div>${b.subtitle ? `<div>${esc(b.subtitle)}</div>` : ''}<div>${esc(
-                renderCardPeopleMobile(b.people)
-              )}</div><div>${esc(publisher(b.publisher))}</div><div class="meta">${esc(
-                b.classification
-              )} ${esc(
-                className(b.classification)
-              )}</div><div class="meta"><span class="badge">${esc(
-                b.status
-              )}</span></div></div><span>›</span></a>`
-          )
-          .join('')}</div><div id="empty-results" class="empty" ${
-          visible.length ? 'hidden' : ''
-        }>該当する本がありません。条件を変えてください。</div>${
-          hasMoreServerBooks
-            ? `<div class="pagination"><button type="button" id="load-more" ${
-                isListSearching ? 'disabled' : ''
-              }>${isListSearching ? '読み込み中...' : 'さらに100件を読み込む'}</button></div>`
-            : ''
-        }`
+        }</button><button type="button" id="csv">CSV出力</button><button type="button" id="print">印刷・PDF保存</button></div>${resultsMarkup}`
 
         app.innerHTML = markup
 
         const search = $('#search')
-        // 1文字入力ごとの自動検索は行わず、検索ボタン（またはEnter）押下時のみDB検索を実行
-        $('#quick-search').onsubmit = (e: Event) => {
-          e.preventDefault()
-          filters.q = search.value
-          search.blur()
-          runServerSearch({ append: false })
+        if ($('#quick-search')) {
+          $('#quick-search').onsubmit = (e: Event) => {
+            e.preventDefault()
+            filters.q = search.value
+            search.blur()
+            runServerSearch({ append: false })
+          }
         }
-        $('#status-filter').onchange = (e: any) => {
-          filters.status = e.target.value
-          runServerSearch({ append: false })
+        if ($('#status-filter')) {
+          $('#status-filter').onchange = (e: any) => {
+            filters.status = e.target.value
+            runServerSearch({ append: false })
+          }
         }
         $('#sort').onchange = (e: any) => {
           filters.sort = e.target.value
-          runServerSearch({ append: false })
+          if (hasSearched) runServerSearch({ append: false })
+          else listBooks()
         }
         $('#direction').onclick = () => {
           filters.asc = !filters.asc
-          runServerSearch({ append: false })
+          if (hasSearched) runServerSearch({ append: false })
+          else listBooks()
         }
         if ($('#favorites')) {
           $('#favorites').onclick = () => {
@@ -1550,30 +1615,20 @@ export default function YopacAppPage() {
             runServerSearch({ append: false })
           }
         }
-        $('#clear').onclick = () => {
-          filters = {
-            q: '',
-            publisher: '',
-            status: '',
-            series: '',
-            cls: '',
-            sort: 'registered',
-            asc: false,
-            favorite: false,
-            tree: { mode: 'AND', negate: false, children: [] },
-          }
-          runServerSearch({ append: false })
-        }
+        if ($('#clear')) $('#clear').onclick = resetAllFilters
+        if ($('#clear-advanced')) $('#clear-advanced').onclick = resetAllFilters
         $('#advanced').onclick = () => {
           advanced = !advanced
           listBooks()
         }
-        $('#scan').onclick = () =>
-          scanISBN((s: string) => {
-            filters.q = s
-            runServerSearch({ append: false })
-          })
-        $('#class-filter').onclick = classPicker
+        if ($('#scan')) {
+          $('#scan').onclick = () =>
+            scanISBN((s: string) => {
+              filters.q = s
+              runServerSearch({ append: false })
+            })
+        }
+        if ($('#class-filter')) $('#class-filter').onclick = classPicker
         if ($('#load-more')) {
           $('#load-more').onclick = () => runServerSearch({ append: true })
         }
@@ -1647,6 +1702,7 @@ export default function YopacAppPage() {
             const x = db.saved.find((s: any) => s.id === e.target.value)
             if (x) {
               filters = structuredClone(x.filters)
+              advanced = Boolean(filters.tree?.children && filters.tree.children.length > 0)
               runServerSearch({ append: false })
             }
           }
@@ -1680,6 +1736,7 @@ export default function YopacAppPage() {
       }
 
       function goBooks() {
+        advanced = false
         if (location.hash === '#books' || location.hash === '') {
           runServerSearch({ append: false })
         } else {
@@ -1687,7 +1744,6 @@ export default function YopacAppPage() {
           runServerSearch({ append: false })
         }
       }
-
       function classPicker() {
         let prefix = ''
         let nonDecimalMode = false
@@ -4389,7 +4445,7 @@ export default function YopacAppPage() {
       </div>
       <header>
         <a className="brand" href="#books">
-          YOPAC <small>芳弘の蔵書管理システム</small>
+          YOPAC <small>Yoshi&apos;s Online Public Access Catalog</small>
         </a>
         <nav id="main-nav" aria-label="主なメニュー">
           <a href="#books">所蔵リスト</a>

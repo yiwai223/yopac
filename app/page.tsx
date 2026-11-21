@@ -1512,7 +1512,11 @@ export default function YopacAppPage() {
                     role === 'admin' ? `#book/${b.id}` : '#books'
                   }">${renderCoverImg(b, '')}<div class="copy"><div class="title">${esc(
                     b.title
-                  )}</div>${b.subtitle ? `<div>${esc(b.subtitle)}</div>` : ''}<div>${esc(
+                  )}</div>${b.subtitle ? `<div>${esc(b.subtitle)}</div>` : ''}${
+                    b.series || b.volume
+                      ? `<div class="meta">${esc([b.series, b.volume].filter(Boolean).join(' '))}</div>`
+                      : ''
+                  }<div>${esc(
                     renderCardPeopleMobile(b.people)
                   )}</div><div>${esc(publisher(b.publisher))}</div><div class="meta">${esc(
                     b.classification

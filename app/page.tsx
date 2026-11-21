@@ -1537,7 +1537,9 @@ export default function YopacAppPage() {
           countText ? `<div class="count">${countText}</div>` : ''
         }</div>${
           role === 'admin' ? '<a class="button primary" href="#book/new">＋ 蔵書追加</a>' : ''
-        }</div><div id="simple-search-area" ${
+        }</div><div class="toolbar"><button type="button" id="advanced" class="${
+          advanced ? 'secondary' : ''
+        }">${advanced ? '簡易検索へ' : '詳細検索画面へ'}</button></div><div id="simple-search-area" ${
           advanced ? 'hidden' : ''
         }><form class="toolbar" id="quick-search" role="search"><input type="search" id="search" aria-label="蔵書検索" enterkeyhint="search" autocomplete="off" placeholder="書名・著者名・シリーズ・出版社・ISBNで検索" value="${esc(
           filters.q
@@ -1552,9 +1554,7 @@ export default function YopacAppPage() {
           role === 'admin'
             ? `<button type="button" id="favorites">${filters.favorite ? '★' : '☆'} お気に入り</button>`
             : ''
-        }</div></div><div class="toolbar"><button type="button" id="advanced" class="${
-          advanced ? 'secondary' : ''
-        }">${advanced ? '簡易検索へ' : '詳細検索へ'}</button></div><section id="advanced-panel" class="panel" ${
+        }</div></div><section id="advanced-panel" class="panel" ${
           advanced ? '' : 'hidden'
         }><h2>詳細検索</h2><div class="muted">日付は YYYY-MM-DD、価格は円。人物の役割は書籍に付けたラベルを検索します。</div><div id="conditions">${ruleHTML(
           filters.tree

@@ -1206,6 +1206,85 @@ export default function YopacAppPage() {
         }
       }
 
+      function kanjiNumeralToArabic(s: string): string {
+        const digits: Record<string, number> = {
+          〇: 0, 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+        }
+        const units: Record<string, number> = { 十: 10, 百: 100, 千: 1000 }
+        if (!/[十百千]/.test(s)) {
+          return [...s].map((ch) => String(digits[ch] ?? ch)).join('')
+        }
+        let total = 0
+        let current = 0
+        for (const ch of s) {
+          if (ch in digits) {
+            current = digits[ch]
+          } else if (ch in units) {
+            total += (current || 1) * units[ch]
+            current = 0
+          }
+        }
+        return String(total + current)
+      }
+
+      function normalizeVolumeForSort(raw: string): string {
+        let s = String(raw ?? '').normalize('NFKC').trim()
+        if (!s) return ''
+
+        // 1. ローマ数字（Ⅰ〜ⅩⅩ / I〜XX：英単語の一部は除外）
+        const romanMap: Record<string, string> = {
+          xx: '20', xix: '19', xviii: '18', xvii: '17', xvi: '16',
+          xv: '15', xiv: '14', xiii: '13', xii: '12', xi: '11',
+          x: '10', ix: '9', viii: '8', vii: '7', vi: '6',
+          v: '5', iv: '4', iii: '3', ii: '2', i: '1',
+        }
+        s = s.replace(
+          /(?<![A-Za-z])(xx|xix|xviii|xvii|xvi|xv|xiv|xiii|xii|xi|x|ix|viii|vii|vi|v|iv|iii|ii|i)(?![A-Za-z])/gi,
+          (m) => romanMap[m.toLowerCase()] || m
+        )
+
+        // 2. 漢数字（一〜千）を算用数字へ変換
+        s = s.replace(/[〇零一二三四五六七八九十百千]+/g, (m) => kanjiNumeralToArabic(m))
+
+        // 3. 上中下・前後編・正続・天地人・乾坤を順序付きの数字へ変換
+        const ordinalRules: Array<[RegExp, string]> = [
+          [/^上([巻編篇]|の巻)?$/, '0001'],
+          [/^中([巻編篇]|の巻)?$/, '0002'],
+          [/^下([巻編篇]|の巻)?$/, '0003'],
+          [/([（(\s]|^)(上)([巻編篇])?([）)\s]|$)/g, '$10001$4'],
+          [/([（(\s]|^)(中)([巻編篇])?([）)\s]|$)/g, '$10002$4'],
+          [/([（(\s]|^)(下)([巻編篇])?([）)\s]|$)/g, '$10003$4'],
+          [/前[編篇半]/g, '0001'],
+          [/中[編篇]/g, '0002'],
+          [/後[編篇半]/g, '0003'],
+          [/^正([編篇巻])?$/, '0001'],
+          [/^続々([編篇巻])?$/, '0003'],
+          [/^続([編篇巻])?$/, '0002'],
+          [/^天([巻]|の巻)?$/, '0001'],
+          [/^地([巻]|の巻)?$/, '0002'],
+          [/^人([巻]|の巻)?$/, '0003'],
+          [/^乾([巻]|の巻)?$/, '0001'],
+          [/^坤([巻]|の巻)?$/, '0002'],
+        ]
+        for (const [re, rep] of ordinalRules) {
+          s = s.replace(re, rep)
+        }
+
+        return normal(s)
+      }
+
+      function sortByVolumeNatural(list: any[], asc: boolean) {
+        return [...list].sort((a, b) => {
+          const av = normalizeVolumeForSort(a.volume || '')
+          const bv = normalizeVolumeForSort(b.volume || '')
+          if (!av && bv) return 1
+          if (av && !bv) return -1
+          const cmp = av.localeCompare(bv, 'ja', { numeric: true })
+          if (cmp !== 0) return cmp * (asc ? 1 : -1)
+          return normal(a.title).localeCompare(normal(b.title), 'ja', { numeric: true })
+        })
+      }
+
       function treeHasWorkField(g: any): boolean {
         if (!g) return false
         if (g.field === 'work') return true
@@ -1246,7 +1325,11 @@ export default function YopacAppPage() {
             const mappedAll = rawAll
               .filter((r: any) => !r.deleted_at)
               .map((r: any) => mapBookRow(r, true))
-            advancedAllMatches = mappedAll.filter((b: any) => evaluate(b, filters.tree))
+            let matchedAdv = mappedAll.filter((b: any) => evaluate(b, filters.tree))
+            if (filters.sort === 'volume') {
+              matchedAdv = sortByVolumeNatural(matchedAdv, filters.asc)
+            }
+            advancedAllMatches = matchedAdv
             searchTotalCount = advancedAllMatches.length
 
             const firstPage = advancedAllMatches.slice(0, LIST_PAGE_SIZE)
@@ -1322,6 +1405,49 @@ export default function YopacAppPage() {
 
               query = query.or(orParts.join(','))
             }
+          }
+
+          if (filters.sort === 'volume') {
+            if (append) {
+              const nextSlice = advancedAllMatches.slice(
+                lastResults.length,
+                lastResults.length + LIST_PAGE_SIZE
+              )
+              await resolveCoverUrlsBatch(nextSlice)
+              lastResults = [...lastResults, ...nextSlice]
+              hasMoreServerBooks = lastResults.length < advancedAllMatches.length
+              saveStateLabel('読み込み済み')
+              return
+            }
+
+            const { data, count, error } = await query.range(0, 999)
+            if (error) throw error
+
+            const rows: any[] = ((data as any[]) || []).filter((r: any) => !r.deleted_at)
+            const mapped = rows.map((r: any) => mapBookRow(r, needsFull))
+            const filteredAll = sortByVolumeNatural(
+              mapped.filter((b: any) => !filters.favorite || b.favorite),
+              filters.asc
+            )
+            advancedAllMatches = filteredAll
+            searchTotalCount =
+              !filters.favorite && typeof count === 'number' ? count : filteredAll.length
+
+            const firstPage = filteredAll.slice(0, LIST_PAGE_SIZE)
+            await resolveCoverUrlsBatch(firstPage)
+            syncBooksIntoConfirmed(firstPage)
+            if (!pendingTarget && !saveRunning) {
+              for (const b of firstPage) {
+                const idx = db.books.findIndex((x: any) => x.id === b.id)
+                if (idx < 0) db.books.push(b)
+                else if (!db.books[idx]._detailLoaded) db.books[idx] = b
+              }
+            }
+            lastResults = firstPage
+            hasMoreServerBooks = filteredAll.length > firstPage.length
+            serverOffset = firstPage.length
+            saveStateLabel('読み込み済み')
+            return
           }
 
           const { data, count, error } = await query

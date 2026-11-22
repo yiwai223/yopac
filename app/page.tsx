@@ -2935,7 +2935,7 @@ export default function YopacAppPage() {
           const wpList = $('#related-work-people-list', form)
           const wpSearch = $('#related-work-person-search', form)
           const wpHits = $('#related-work-person-hits', form)
-          function drawWorkPeople() {
+          const drawWorkPeople = () => {
             wpList.innerHTML = selectedWorkPeople.length
               ? selectedWorkPeople
                   .map(
@@ -2960,10 +2960,10 @@ export default function YopacAppPage() {
                 (cb.onchange = () => {
                   const idx = Number(cb.dataset.wpRole)
                   const role = cb.value
-                  const cur = new Set(selectedWorkPeople[idx].roles || [])
+                  const cur = new Set<string>(selectedWorkPeople[idx].roles || [])
                   if (cb.checked) cur.add(role)
                   else cur.delete(role)
-                  selectedWorkPeople[idx].roles = [...cur]
+                  selectedWorkPeople[idx].roles = Array.from(cur)
                 })
             )
             $$('[data-wp-remove]', wpList).forEach(
@@ -2975,7 +2975,7 @@ export default function YopacAppPage() {
                 })
             )
           }
-          function drawWorkPersonHits() {
+          const drawWorkPersonHits = () => {
             const q = relatedSearchText(wpSearch.value)
             if (!q) {
               wpHits.innerHTML = ''
@@ -3180,8 +3180,8 @@ export default function YopacAppPage() {
             return
           }
           selectedBar.style.display = 'block'
-          const picked = [...selectedIds]
-            .map((sid) => records.find((x: any) => x.id === sid))
+          const picked = Array.from(selectedIds)
+            .map((sid: string) => records.find((x: any) => x.id === sid))
             .filter(Boolean)
           selectedBar.innerHTML = `<div class="inline-links" style="align-items:center;margin-bottom:8px">${picked
             .map(
@@ -3206,8 +3206,8 @@ export default function YopacAppPage() {
               })
           )
           $('#related-picker-commit', selectedBar).onclick = () => {
-            const list = [...selectedIds]
-              .map((sid) => records.find((x: any) => x.id === sid))
+            const list = Array.from(selectedIds)
+              .map((sid: string) => records.find((x: any) => x.id === sid))
               .filter(Boolean)
             closeModal()
             onSelect(list)

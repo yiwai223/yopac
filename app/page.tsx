@@ -7,7 +7,9 @@ import { useRouter } from 'next/navigation'
 const HONGAKU_STYLE = `
 :root{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;color:#24392d;background:#f4f7f4;line-height:1.6;font-size:15px;--green:#22bf58;--deep:#176b36;--line:#dbe5dc;--blue:#3e5d85}
 .yopac-root, .yopac-root *{box-sizing:border-box}
-body{margin:0;color:#24392d;background:#f4f7f4}
+html{height:auto!important;min-height:100%!important;overflow-y:auto!important;overflow-x:clip}
+body{margin:0;height:auto!important;min-height:100%!important;overflow-y:visible!important;overflow-x:clip;color:#24392d;background:#f4f7f4;-webkit-overflow-scrolling:touch}
+.yopac-root{min-height:100dvh;overflow-x:clip;overflow-y:visible}
 .yopac-root button,.yopac-root input,.yopac-root select,.yopac-root textarea{font:inherit}
 .yopac-root button,.yopac-root a,.yopac-root input,.yopac-root select,.yopac-root textarea{touch-action:manipulation}
 .yopac-root button{cursor:pointer}
@@ -20,7 +22,7 @@ body{margin:0;color:#24392d;background:#f4f7f4}
 .yopac-root .brand{font-size:23px;font-weight:700;white-space:nowrap}
 .yopac-root .brand small{font-size:13px;font-weight:400;margin-left:12px}
 .yopac-root nav{display:flex;gap:20px;font-size:14px;flex-wrap:wrap;align-items:center}
-.yopac-root main{max-width:1250px;margin:auto;padding:28px 24px 50px}
+.yopac-root main{max-width:1250px;margin:auto;padding:28px 24px calc(72px + env(safe-area-inset-bottom, 0px))}
 .yopac-root h1{font-size:25px;margin:0;font-weight:700;color:#24392d}
 .yopac-root h2{font-size:19px;margin:0 0 15px;font-weight:700;color:#24392d}
 .yopac-root h3{font-size:16px;margin:20px 0 8px;font-weight:600;color:#24392d}
@@ -91,7 +93,12 @@ body{margin:0;color:#24392d;background:#f4f7f4}
 .yopac-root .book-card .meta{font-size:13px;color:#5a705f}
 .yopac-root .favorite{font-size:21px}
 #toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#1b432b;color:white;padding:12px 22px;border-radius:8px;display:none;max-width:90vw;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,0.18)}
-.yopac-root dialog{border:1px solid var(--line);border-radius:12px;padding:24px;max-width:700px;width:calc(100% - 30px);max-height:90vh;overflow:auto;background:white;color:#24392d}
+.yopac-root dialog{border:1px solid var(--line);border-radius:12px;padding:20px;max-width:700px;width:calc(100% - 24px);max-height:85vh;max-height:85dvh;overflow:hidden;background:white;color:#24392d;margin:auto}
+.yopac-root dialog[open]{display:flex;flex-direction:column}
+.yopac-root #modal-body{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding-right:2px;padding-bottom:8px}
+.yopac-root #close-modal{flex-shrink:0}
+.yopac-root .picker-check-label{display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0;cursor:pointer}
+.yopac-root .picker-check-label input[type=checkbox]{margin-top:3px;flex-shrink:0}
 .yopac-root dialog::backdrop{background:#12291a66}
 .yopac-root video{width:100%;max-height:280px;background:#17251b;border-radius:8px;object-fit:cover;margin:8px 0}
 .yopac-root .link-button{border:0;padding:0;background:transparent;color:#245d97;text-align:left;font-size:inherit}
@@ -118,7 +125,8 @@ body{margin:0;color:#24392d;background:#f4f7f4}
   .yopac-root header{padding:16px;display:block}
   .yopac-root header nav{gap:10px 14px;justify-content:flex-start;margin-top:12px;font-size:13px}
   .yopac-root .brand{font-size:21px}
-  .yopac-root main{padding:20px 12px 35px}
+  .yopac-root main{padding:20px 12px calc(100px + env(safe-area-inset-bottom, 0px))}
+  .yopac-root dialog{padding:16px;width:calc(100% - 16px);max-height:82vh;max-height:82dvh}
   .yopac-root .detail-grid,.yopac-root .form-grid{grid-template-columns:1fr}
   .yopac-root .desktop-list{display:none}
   .yopac-root .mobile-list{display:block;border:1px solid var(--line);border-radius:8px;overflow:hidden}
@@ -987,6 +995,7 @@ export default function YopacAppPage() {
       function openModal(html: string) {
         modalBody.innerHTML = html
         if (!modal.open) modal.showModal()
+        modalBody.scrollTop = 0
       }
 
       function closeModal() {
@@ -2425,13 +2434,44 @@ export default function YopacAppPage() {
         }
       }
 
-      async function bulkAddWorks(bookDraftObj: any, onDone: (workIds: string[]) => void) {
+      async function bulkAddWorks(
+        bookDraftObj: any,
+        onDone: (workIds: string[]) => void,
+        initialText = '',
+        initialFormat = '',
+        initialInherit?: boolean
+      ) {
         await ensureWorksLoaded()
         ensureWorkFormats()
         const formatValues = db.workFormats || []
         const bookAuthors = (bookDraftObj.people || [])
           .map((m: any) => person(m.id))
           .filter(Boolean)
+        const bookAuthorByNorm = new Map<string, any>(
+          bookAuthors.map((p: any) => [normal(p.name), p])
+        )
+        const inheritChecked =
+          initialInherit !== undefined ? initialInherit : bookAuthors.length > 0
+
+        function describePersonCandidate(per: any) {
+          const parts: string[] = []
+          if (per.reading) parts.push(per.reading)
+          if (per.description) {
+            const firstLine = String(per.description).split(/
+?
+/)[0].trim()
+            if (firstLine) parts.push(firstLine)
+          }
+          const sampleWorks = db.works
+            .filter((w: any) => (w.people || []).some((m: any) => m.id === per.id))
+            .slice(0, 2)
+            .map((w: any) => w.title)
+          if (sampleWorks.length) {
+            parts.push(`作品:${sampleWorks.join('・')}`)
+          }
+          if (per.ndlId) parts.push(`NDL:${per.ndlId}`)
+          return parts.length ? `${per.name}（${parts.join(' / ')}）` : per.name
+        }
 
         openModal(
           `<h2>収録作品を一括登録</h2>
@@ -2446,14 +2486,14 @@ export default function YopacAppPage() {
             <label>デフォルトの形式
               <select id="bulk-default-format">
                 <option value="">未設定</option>
-                ${opts(formatValues, '')}
+                ${opts(formatValues, initialFormat)}
               </select>
             </label>
             <div class="field-box">
               <div class="label">デフォルトの著者</div>
               <label class="role-check" style="margin-top:6px">
                 <input type="checkbox" id="bulk-inherit-authors" ${
-                  bookAuthors.length ? 'checked' : ''
+                  inheritChecked ? 'checked' : ''
                 }>
                 この書籍の著者を自動で引き継ぐ${
                   bookAuthors.length
@@ -2464,7 +2504,9 @@ export default function YopacAppPage() {
             </div>
           </div>
           <label style="display:block;font-weight:600;margin-bottom:6px">作品リスト（1行に1作品）
-            <textarea id="bulk-works-text" rows="9" placeholder="作品名&#10;作品名 / 著者名&#10;作品名 / 著者名 / 形式"></textarea>
+            <textarea id="bulk-works-text" rows="9" placeholder="作品名&#10;作品名 / 著者名&#10;作品名 / 著者名 / 形式">${esc(
+              initialText
+            )}</textarea>
           </label>
           <div class="toolbar" style="margin-top:12px">
             <button type="button" id="bulk-preview-btn" class="primary">内容を確認する（プレビュー）</button>
@@ -2477,7 +2519,9 @@ export default function YopacAppPage() {
         $('#bulk-preview-btn', modalBody).onclick = () => {
           const rawText = $('#bulk-works-text', modalBody).value || ''
           const lines = rawText
-            .split(/\r?\n/)
+            .split(/
+?
+/)
             .map((l: string) => l.trim())
             .filter(Boolean)
           if (!lines.length) return notify('作品名を1行以上入力してください')
@@ -2528,10 +2572,107 @@ export default function YopacAppPage() {
             }
           })
 
+          // 登場するユニークな著者ごとに既存候補（同姓同名含む）を収集
+          const uniqueAuthorMap = new Map<
+            string,
+            { norm: string; displayName: string; candidates: any[]; defaultChoice: string }
+          >()
+          for (const row of parsedRows) {
+            for (const aName of row.authorNames) {
+              const norm = normal(aName)
+              if (!norm || uniqueAuthorMap.has(norm)) continue
+              const candidates = db.people.filter(
+                (per: any) =>
+                  normal(per.name) === norm ||
+                  (per.aliases || []).some((al: string) => normal(al) === norm)
+              )
+              const bookAuth = bookAuthorByNorm.get(norm)
+              let defaultChoice = '__new__'
+              if (bookAuth && candidates.some((c: any) => c.id === bookAuth.id)) {
+                defaultChoice = bookAuth.id
+              } else if (candidates.length === 1) {
+                defaultChoice = candidates[0].id
+              } else if (candidates.length > 1) {
+                // 同姓同名が複数いる場合は誤統合を防ぐため明示選択を促す
+                defaultChoice = ''
+              }
+              uniqueAuthorMap.set(norm, {
+                norm,
+                displayName: aName,
+                candidates,
+                defaultChoice,
+              })
+            }
+          }
+          const authorEntries = Array.from(uniqueAuthorMap.values())
+          const hasExistingAuthorCandidates = authorEntries.some((a) => a.candidates.length > 0)
+
+          const authorMatchSection = authorEntries.length
+            ? `<section class="panel" style="margin:12px 0;padding:14px">
+                <h3 style="margin:0 0 6px">著者の照合確認（同姓同名チェック）</h3>
+                <p class="muted" style="margin:0 0 10px">${
+                  hasExistingAuthorCandidates
+                    ? '既存登録と一致した著者があります。同姓同名の別人の場合は「＋ 同姓同名の別人として新規登録」を選んでください。'
+                    : 'すべて新規の人物として登録されます。'
+                }</p>
+                <div style="display:grid;gap:10px">
+                  ${authorEntries
+                    .map((entry, aIdx) => {
+                      const candCount = entry.candidates.length
+                      const statusBadge =
+                        candCount === 0
+                          ? '<span class="badge">新規著者</span>'
+                          : candCount === 1
+                          ? '<span class="badge" style="background:#fff6e5;color:#8a5200;border-color:#ebd2a0">既存1件一致（要確認）</span>'
+                          : `<span class="badge" style="background:#fdeaea;color:#a32f2f;border-color:#ebb8b8">同姓同名 ${candCount}件（要選択）</span>`
+
+                      const selectMarkup =
+                        candCount > 0
+                          ? `<select data-bulk-author-choice="${aIdx}" style="margin-top:6px;font-size:13px">
+                              ${
+                                candCount > 1
+                                  ? '<option value="">-- 紐づけ先を選択してください --</option>'
+                                  : ''
+                              }
+                              ${entry.candidates
+                                .map(
+                                  (c: any) =>
+                                    `<option value="${esc(c.id)}" ${
+                                      entry.defaultChoice === c.id ? 'selected' : ''
+                                    }>既存：${esc(describePersonCandidate(c))}</option>`
+                                )
+                                .join('')}
+                              <option value="__new__" ${
+                                entry.defaultChoice === '__new__' ? 'selected' : ''
+                              }>＋ 同姓同名の別人として新規登録</option>
+                            </select>`
+                          : `<input type="hidden" data-bulk-author-choice="${aIdx}" value="__new__">`
+
+                      const showExtraInitially = entry.defaultChoice === '__new__' && candCount > 0
+                      return `<div style="padding:10px;border:1px solid var(--line);border-radius:7px;background:#fafcfa" data-bulk-author-box="${aIdx}">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                          <strong>${esc(entry.displayName)}</strong>
+                          ${statusBadge}
+                        </div>
+                        ${selectMarkup}
+                        <div data-bulk-author-extra="${aIdx}" ${
+                          showExtraInitially ? '' : 'hidden'
+                        } style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+                          <input type="text" data-bulk-author-reading="${aIdx}" placeholder="区別用のよみ（任意）" style="font-size:13px;padding:6px 8px">
+                          <input type="text" data-bulk-author-desc="${aIdx}" placeholder="区別用の肩書・メモ（例：漫画家）" style="font-size:13px;padding:6px 8px">
+                        </div>
+                      </div>`
+                    })
+                    .join('')}
+                </div>
+              </section>`
+            : ''
+
           openModal(
             `<h2>一括登録の内容確認（${parsedRows.length}件）</h2>
+            ${authorMatchSection}
             <p class="muted">各行の著者のチェックを外すと、その著者を除外して登録できます。</p>
-            <div class="table-wrap" style="margin:12px 0;max-height:50vh;overflow:auto">
+            <div class="table-wrap" style="margin:12px 0;max-height:42vh;overflow:auto">
               <table>
                 <thead>
                   <tr>
@@ -2587,15 +2728,76 @@ export default function YopacAppPage() {
                 </tbody>
               </table>
             </div>
+            <p id="bulk-author-error" role="alert" class="danger"></p>
             <div class="toolbar">
               <button type="button" id="bulk-exec-btn" class="primary">この内容で一括登録・紐付け</button>
               <button type="button" id="bulk-back-btn">入力画面に戻る</button>
             </div>`
           )
 
-          $('#bulk-back-btn', modalBody).onclick = () => bulkAddWorks(bookDraftObj, onDone)
+          // 「同姓同名の別人として新規登録」を選んだときだけ区別用入力欄を表示
+          $$('select[data-bulk-author-choice]', modalBody).forEach((sel: any) => {
+            sel.onchange = () => {
+              const idx = sel.dataset.bulkAuthorChoice
+              const extra = $(`[data-bulk-author-extra="${idx}"]`, modalBody)
+              if (extra) extra.hidden = sel.value !== '__new__'
+              const errEl = $('#bulk-author-error', modalBody)
+              if (errEl) errEl.textContent = ''
+            }
+          })
+
+          $('#bulk-back-btn', modalBody).onclick = () =>
+            bulkAddWorks(bookDraftObj, onDone, rawText, defaultFormat, inheritAuthors)
 
           $('#bulk-exec-btn', modalBody).onclick = () => {
+            // 同姓同名で未選択の著者が残っていないか検証
+            const usedNorms = new Set<string>()
+            parsedRows.forEach((row: any, i: number) => {
+              const modeSelect = $(`[data-bulk-row-mode="${i}"]`, modalBody)
+              const useExisting =
+                row.existingWorkId && (!modeSelect || modeSelect.value === 'existing')
+              if (useExisting) return
+              const checkedBoxes = $$(`input[data-bulk-row-author="${i}"]:checked`, modalBody)
+              checkedBoxes.forEach((cb: any) => {
+                const aName = row.authorNames[Number(cb.dataset.authorIdx)]
+                if (aName) usedNorms.add(normal(aName))
+              })
+            })
+
+            const resolvedAuthorIdByNorm = new Map<string, string>()
+            for (let aIdx = 0; aIdx < authorEntries.length; aIdx++) {
+              const entry = authorEntries[aIdx]
+              if (!usedNorms.has(entry.norm)) continue
+              const choiceEl = $(`[data-bulk-author-choice="${aIdx}"]`, modalBody)
+              const choice = choiceEl ? choiceEl.value : '__new__'
+              if (!choice) {
+                const errEl = $('#bulk-author-error', modalBody)
+                if (errEl) {
+                  errEl.textContent = `同姓同名の候補がある「${entry.displayName}」の紐づけ先を選択してください。`
+                }
+                return
+              }
+              if (choice === '__new__') {
+                const reading = ($(`[data-bulk-author-reading="${aIdx}"]`, modalBody)?.value || '').trim()
+                const description = ($(`[data-bulk-author-desc="${aIdx}"]`, modalBody)?.value || '').trim()
+                if (description) rememberShoulder(description)
+                const newPerson = {
+                  id: id(),
+                  name: entry.displayName,
+                  reading,
+                  description,
+                  url: '',
+                  original: '',
+                  aliases: [],
+                  ndlId: '',
+                }
+                db.people.push(newPerson)
+                resolvedAuthorIdByNorm.set(entry.norm, newPerson.id)
+              } else {
+                resolvedAuthorIdByNorm.set(entry.norm, choice)
+              }
+            }
+
             const addedWorkIds: string[] = []
             let createdWorksCount = 0
             let linkedExistingCount = 0
@@ -2622,22 +2824,9 @@ export default function YopacAppPage() {
 
               const workPeople: any[] = []
               for (const aName of selectedAuthorNames) {
-                let p = db.people.find((per: any) => normal(per.name) === normal(aName))
-                if (!p) {
-                  p = {
-                    id: id(),
-                    name: aName,
-                    reading: '',
-                    description: '',
-                    url: '',
-                    original: '',
-                    aliases: [],
-                    ndlId: '',
-                  }
-                  db.people.push(p)
-                }
-                if (!workPeople.some((m) => m.id === p.id)) {
-                  workPeople.push({ id: p.id, roles: ['著者'], printed: '' })
+                const pid = resolvedAuthorIdByNorm.get(normal(aName))
+                if (pid && !workPeople.some((m) => m.id === pid)) {
+                  workPeople.push({ id: pid, roles: ['著者'], printed: '' })
                 }
               }
 
@@ -2665,7 +2854,6 @@ export default function YopacAppPage() {
           }
         }
       }
-
       async function createRelated(type: 'person' | 'publisher' | 'work', onSelect: any) {
         if (type === 'work') await ensureWorksLoaded()
         const config = {
@@ -2732,6 +2920,8 @@ export default function YopacAppPage() {
                       )}">${esc(r)}</label>`
                   )
                   .join('')}</div>`
+              : type === 'work'
+              ? `<h3>著作者など（複数追加可）</h3><div id="related-work-people-list"></div><input type="search" id="related-work-person-search" placeholder="登録済みの人物・団体を検索して追加…" autocomplete="off" style="margin:8px 0"><div id="related-work-person-hits"></div>`
               : ''
           }<div id="related-duplicates" aria-live="polite"></div><p><label class="role-check"><input type="checkbox" id="allow-related-duplicate">同名でも別の${
             type === 'person' ? '人物・団体' : type === 'publisher' ? '出版者・レーベル' : '作品'
@@ -2740,6 +2930,91 @@ export default function YopacAppPage() {
 
         const form = $('#related-create-form')
         bindShoulderField(form)
+        const selectedWorkPeople: any[] = []
+        if (type === 'work') {
+          const wpList = $('#related-work-people-list', form)
+          const wpSearch = $('#related-work-person-search', form)
+          const wpHits = $('#related-work-person-hits', form)
+          function drawWorkPeople() {
+            wpList.innerHTML = selectedWorkPeople.length
+              ? selectedWorkPeople
+                  .map(
+                    (p: any, idx: number) =>
+                      `<div class="member"><strong>${esc(
+                        person(p.id)?.name || '未設定'
+                      )}</strong>${db.roles
+                        .map(
+                          (r: string) =>
+                            `<label class="role-check"><input type="checkbox" data-wp-role="${idx}" value="${esc(
+                              r
+                            )}" ${(p.roles || []).includes(r) ? 'checked' : ''}>${esc(r)}</label>`
+                        )
+                        .join(
+                          ''
+                        )}<button type="button" class="tiny danger" data-wp-remove="${idx}">外す</button></div>`
+                  )
+                  .join('')
+              : '<p class="muted" style="margin:4px 0">まだ著作者が追加されていません（下の検索欄から複数追加できます）</p>'
+            $$('[data-wp-role]', wpList).forEach(
+              (cb: any) =>
+                (cb.onchange = () => {
+                  const idx = Number(cb.dataset.wpRole)
+                  const role = cb.value
+                  const cur = new Set(selectedWorkPeople[idx].roles || [])
+                  if (cb.checked) cur.add(role)
+                  else cur.delete(role)
+                  selectedWorkPeople[idx].roles = [...cur]
+                })
+            )
+            $$('[data-wp-remove]', wpList).forEach(
+              (btn: any) =>
+                (btn.onclick = () => {
+                  selectedWorkPeople.splice(Number(btn.dataset.wpRemove), 1)
+                  drawWorkPeople()
+                  drawWorkPersonHits()
+                })
+            )
+          }
+          function drawWorkPersonHits() {
+            const q = relatedSearchText(wpSearch.value)
+            if (!q) {
+              wpHits.innerHTML = ''
+              return
+            }
+            const usedIds = new Set(selectedWorkPeople.map((p: any) => p.id))
+            const hits = db.people
+              .filter((x: any) => !usedIds.has(x.id) && relatedSearchText(personText(x)).includes(q))
+              .slice(0, 8)
+            wpHits.innerHTML = hits.length
+              ? hits
+                  .map(
+                    (x: any) =>
+                      `<div class="picker-result" style="padding:7px 0"><div><strong>${esc(
+                        x.name
+                      )}</strong>${
+                        x.reading ? ` <span class="muted">（${esc(x.reading)}）</span>` : ''
+                      }</div><button type="button" class="tiny" data-wp-add="${esc(
+                        x.id
+                      )}">＋追加</button></div>`
+                  )
+                  .join('')
+              : '<p class="muted" style="margin:4px 0">一致する人物・団体がありません</p>'
+            $$('[data-wp-add]', wpHits).forEach(
+              (btn: any) =>
+                (btn.onclick = () => {
+                  const pid = btn.dataset.wpAdd
+                  if (!selectedWorkPeople.some((p: any) => p.id === pid)) {
+                    selectedWorkPeople.push({ id: pid, roles: ['著'], printed: '' })
+                  }
+                  wpSearch.value = ''
+                  drawWorkPeople()
+                  drawWorkPersonHits()
+                })
+            )
+          }
+          wpSearch.oninput = wpSearch.oncompositionend = drawWorkPersonHits
+          drawWorkPeople()
+        }
         const nameInput = form.elements.namedItem(config.nameKey)
         const chosenRoles = () =>
           $$('[data-create-role]:checked', form).map((e) => e.dataset.createRole)
@@ -2816,7 +3091,7 @@ export default function YopacAppPage() {
               originalTitle: values.originalTitle || '',
               originals: [],
               translations: [],
-              people: [],
+              people: structuredClone(selectedWorkPeople),
             }
           if (type === 'person') rememberShoulder(record.description)
           db[config.collection].push(record)
@@ -2834,7 +3109,7 @@ export default function YopacAppPage() {
       async function pickRelated(
         kind: 'person' | 'work' | 'publisher',
         onSelect: any,
-        { exclude = [] }: { exclude?: string[] } = {}
+        { exclude = [], multiple = false }: { exclude?: string[]; multiple?: boolean } = {}
       ) {
         if (kind === 'work') await ensureWorksLoaded()
         const configs = {
@@ -2883,12 +3158,61 @@ export default function YopacAppPage() {
           )
         const pageSize = 30
         let limit = pageSize
+        const selectedIds = new Set<string>()
         openModal(
-          `<h2>${label}を検索して選択</h2><p class="muted">${hint}で部分一致検索できます。${note}</p><input type="search" id="related-picker-search" aria-label="${label}の候補検索" placeholder="${hint}" autocomplete="off" enterkeyhint="search"><div id="related-picker-count" class="muted" aria-live="polite"></div><div id="related-picker-results"></div><button type="button" id="related-picker-more">さらに表示</button>`
+          `<h2>${label}を検索して選択${multiple ? '（複数選択可）' : ''}</h2><p class="muted">${hint}で部分一致検索できます。${note}${
+            multiple ? ' チェックを入れて複数まとめて追加できます。' : ''
+          }</p>${
+            multiple
+              ? '<div id="related-picker-selected-bar" class="section-note" style="display:none;margin-bottom:10px"></div>'
+              : ''
+          }<input type="search" id="related-picker-search" aria-label="${label}の候補検索" placeholder="${hint}" autocomplete="off" enterkeyhint="search"><div id="related-picker-count" class="muted" aria-live="polite"></div><div id="related-picker-results"></div><button type="button" id="related-picker-more">さらに表示</button>`
         )
         const input = $('#related-picker-search')
         const more = $('#related-picker-more')
         const results = $('#related-picker-results')
+        const selectedBar = multiple ? $('#related-picker-selected-bar') : null
+        function drawSelectedBar() {
+          if (!selectedBar) return
+          if (!selectedIds.size) {
+            selectedBar.style.display = 'none'
+            selectedBar.innerHTML = ''
+            return
+          }
+          selectedBar.style.display = 'block'
+          const picked = [...selectedIds]
+            .map((sid) => records.find((x: any) => x.id === sid))
+            .filter(Boolean)
+          selectedBar.innerHTML = `<div class="inline-links" style="align-items:center;margin-bottom:8px">${picked
+            .map(
+              (x: any) =>
+                `<span class="badge">${esc(
+                  name(x)
+                )} <button type="button" class="tiny" data-unpick-record="${esc(
+                  x.id
+                )}" aria-label="選択解除">×</button></span>`
+            )
+            .join(
+              ''
+            )}</div><button type="button" id="related-picker-commit" class="primary">選択した${
+            picked.length
+          }${kind === 'person' ? '人' : '件'}を追加</button>`
+          $$('[data-unpick-record]', selectedBar).forEach(
+            (btn: any) =>
+              (btn.onclick = () => {
+                selectedIds.delete(btn.dataset.unpickRecord)
+                drawSelectedBar()
+                draw()
+              })
+          )
+          $('#related-picker-commit', selectedBar).onclick = () => {
+            const list = [...selectedIds]
+              .map((sid) => records.find((x: any) => x.id === sid))
+              .filter(Boolean)
+            closeModal()
+            onSelect(list)
+          }
+        }
         function draw() {
           const q = relatedSearchText(input.value)
           const hits = records.filter((x: any) => relatedSearchText(search(x)).includes(q))
@@ -2899,25 +3223,44 @@ export default function YopacAppPage() {
           results.innerHTML =
             hits
               .slice(0, limit)
-              .map(
-                (x: any) =>
-                  `<div class="picker-result"><div><strong>${esc(
-                    name(x)
-                  )}</strong><div class="muted">${esc(
-                    details(x).filter(Boolean).join(' · ')
-                  )}</div></div><button type="button" data-pick-record="${esc(
-                    x.id
-                  )}">選択</button></div>`
+              .map((x: any) =>
+                multiple
+                  ? `<div class="picker-result"><label class="picker-check-label"><input type="checkbox" data-check-record="${esc(
+                      x.id
+                    )}" ${selectedIds.has(x.id) ? 'checked' : ''}><div><strong>${esc(
+                      name(x)
+                    )}</strong><div class="muted">${esc(
+                      details(x).filter(Boolean).join(' · ')
+                    )}</div></div></label><button type="button" class="tiny" data-pick-record="${esc(
+                      x.id
+                    )}">選択</button></div>`
+                  : `<div class="picker-result"><div><strong>${esc(
+                      name(x)
+                    )}</strong><div class="muted">${esc(
+                      details(x).filter(Boolean).join(' · ')
+                    )}</div></div><button type="button" data-pick-record="${esc(
+                      x.id
+                    )}">選択</button></div>`
               )
               .join('') ||
             '<p class="empty">候補がありません。別の語で検索するか、新規登録してください。</p>'
           more.hidden = hits.length <= limit
+          if (multiple) {
+            $$('[data-check-record]', results).forEach(
+              (cb: any) =>
+                (cb.onchange = () => {
+                  if (cb.checked) selectedIds.add(cb.dataset.checkRecord)
+                  else selectedIds.delete(cb.dataset.checkRecord)
+                  drawSelectedBar()
+                })
+            )
+          }
           $$('[data-pick-record]', results).forEach(
             (button) =>
               (button.onclick = () => {
                 const record = records.find((x: any) => x.id === button.dataset.pickRecord)
                 closeModal()
-                onSelect(record)
+                onSelect(multiple ? [record] : record)
               })
           )
         }
@@ -2997,11 +3340,16 @@ export default function YopacAppPage() {
           draft.people = readMembers()
           pickRelated(
             'person',
-            (record: any) => {
-              draft.people.push({ id: record.id, roles: [], printed: '' })
+            (picked: any) => {
+              const list = Array.isArray(picked) ? picked : picked ? [picked] : []
+              for (const record of list) {
+                if (record && !draft.people.some((p: any) => p.id === record.id)) {
+                  draft.people.push({ id: record.id, roles: [], printed: '' })
+                }
+              }
               redraw()
             },
-            { exclude: draft.people.map((p: any) => p.id) }
+            { exclude: draft.people.map((p: any) => p.id), multiple: true }
           )
         }
         $$('[data-change-person]').forEach(
@@ -3748,6 +4096,9 @@ export default function YopacAppPage() {
             people: [],
           }
         )
+        if (!Array.isArray(w.people)) w.people = []
+        if (!Array.isArray(w.originals)) w.originals = []
+        if (!Array.isArray(w.translations)) w.translations = []
         function read() {
           for (const [k, v] of new FormData($('#work-form'))) w[k] = v
           w.people = readMembers()

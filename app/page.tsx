@@ -3992,52 +3992,123 @@ export default function YopacAppPage() {
           .trim()
       }
 
+      function parseNdlSparqlRows(rawText: string): any[] {
+        const trimmed = String(rawText || '').trim()
+        if (!trimmed) return []
+        if (trimmed.startsWith('{')) {
+          const data = JSON.parse(trimmed)
+          return data.results?.bindings || []
+        }
+        if (trimmed.startsWith('<')) {
+          const xml = new DOMParser().parseFromString(trimmed, 'application/xml')
+          if (xml.getElementsByTagName('parsererror').length) {
+            throw Error('NDLの応答を解析できませんでした')
+          }
+          const resultNodes = [...xml.getElementsByTagName('result')]
+          return resultNodes.map((resNode: any) => {
+            const row: any = {}
+            for (const b of [...resNode.getElementsByTagName('binding')]) {
+              const name = b.getAttribute('name')
+              const val = b.textContent?.trim() || ''
+              if (name) row[name] = { value: val }
+            }
+            return row
+          })
+        }
+        throw Error('NDL応答エラー: ' + trimmed.slice(0, 80))
+      }
+
+      async function runNdlSparql(query: string): Promise<any[]> {
+        const rawText = await fetchNdlViaProxy(
+          'https://id.ndl.go.jp/auth/ndla/sparql?output=json&query=' + encodeURIComponent(query)
+        )
+        return parseNdlSparqlRows(rawText)
+      }
+
       async function fetchNdlCandidatesForPerson(p: any) {
-        let query = ''
         const existingId = String(p.ndlId || '').trim()
         if (/^\d{8,}$/.test(existingId)) {
-          query =
-            'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
-            'PREFIX ndl: <http://ndl.go.jp/dcndl/terms/> ' +
-            'PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ' +
-            'SELECT DISTINCT ?uri ?label ?kana ?note WHERE { ' +
-            `BIND(<http://id.ndl.go.jp/auth/ndlna/${existingId}> AS ?uri) ` +
-            '?uri xl:prefLabel ?pref . ?pref xl:literalForm ?label . ' +
-            'OPTIONAL { ?pref ndl:transcription ?kana . FILTER(LANG(?kana) = "ja-Kana") } ' +
-            'OPTIONAL { ?uri skos:note ?note . } ' +
-            '} LIMIT 10'
-        } else {
-          const rawName = String(p.name || '').trim()
-          if (!rawName) return []
-          const tokens = rawName
-            .split(/[\s　,，・]+/)
-            .map((t) => t.trim())
-            .filter(Boolean)
-            .slice(0, 3)
-          if (!tokens.length) return []
-          const filtersExpr = tokens
-            .map((t) => `CONTAINS(LCASE(STR(?label)), LCASE(${JSON.stringify(t)}))`)
-            .join(' && ')
-          query =
-            'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
-            'PREFIX ndl: <http://ndl.go.jp/dcndl/terms/> ' +
-            'PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ' +
-            'SELECT DISTINCT ?uri ?label ?kana ?note WHERE { ' +
-            '?uri xl:prefLabel ?pref . ?pref xl:literalForm ?label . ' +
-            'OPTIONAL { ?pref ndl:transcription ?kana . FILTER(LANG(?kana) = "ja-Kana") } ' +
-            'OPTIONAL { ?uri skos:note ?note . } ' +
-            `FILTER(${filtersExpr}) ` +
-            '} LIMIT 20'
+          const xml = await loadXML('https://id.ndl.go.jp/auth/ndlna/' + existingId + '.rdf')
+          const pref = [...xml.getElementsByTagNameNS('*', 'prefLabel')][0]
+          const label =
+            tagValues(pref || xml, 'literalForm')[0] || tagValues(xml, 'label')[0] || p.name || ''
+          const rawKana =
+            [...(pref || xml).getElementsByTagNameNS('*', 'transcription')].find(
+              (e: any) => (e.getAttribute('xml:lang') || '') === 'ja-Kana'
+            )?.textContent || ''
+          const occs = tagValues(xml, 'professionOrOccupation')
+          const notes = tagValues(xml, 'note')
+            .map((n) => n.replace(/^出典[:：].*$/g, '').trim())
+            .filter((n) => n && n.length <= 40 && !/^https?:\/\//i.test(n))
+          return [
+            {
+              ndlId: existingId,
+              label,
+              reading: formatReadingHiragana(rawKana),
+              description: occs[0] || notes[0] || '',
+              isExact: true,
+            },
+          ]
         }
 
-        const rawJson = await fetchNdlViaProxy(
-          'https://id.ndl.go.jp/auth/ndla?output=json&query=' + encodeURIComponent(query)
-        )
-        const data = JSON.parse(rawJson)
-        const rows = data.results?.bindings || []
+        const rawName = String(p.name || '').trim()
+        if (!rawName) return []
+
+        const noSpace = rawName.replace(/[\s　]+/g, '')
+        const nameVariants = Array.from(new Set([noSpace, rawName].filter(Boolean)))
+        const valuesExpr = nameVariants.map((v) => JSON.stringify(v)).join(' ')
+
+        // 1. 高速なインデックス検索：実体の foaf:name 完全一致（例: "夏目漱石", "星新一"）
+        const exactQuery =
+          'PREFIX foaf: <http://xmlns.com/foaf/0.1/> ' +
+          'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
+          'PREFIX ndl: <http://ndl.go.jp/dcndl/terms/> ' +
+          'PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ' +
+          'PREFIX rda: <http://RDVocab.info/ElementsGr2/> ' +
+          'SELECT DISTINCT ?uri ?label ?kana ?occ ?note WHERE { ' +
+          `VALUES ?fname { ${valuesExpr} } ` +
+          '?entity foaf:name ?fname . ' +
+          '?uri foaf:primaryTopic ?entity . ' +
+          '?uri xl:prefLabel ?pref . ' +
+          '?pref xl:literalForm ?label . ' +
+          'OPTIONAL { ?pref ndl:transcription ?kana . FILTER(LANG(?kana) = "ja-Kana") } ' +
+          'OPTIONAL { ?entity rda:professionOrOccupation ?occ . } ' +
+          'OPTIONAL { ?uri skos:note ?note . } ' +
+          '} LIMIT 20'
+
+        let rows = await runNdlSparql(exactQuery)
+
+        // 2. 見つからない場合は、別名（xl:altLabel）の完全一致またはコンマ形式（"星, 新一"）で再検索
+        if (!rows.length) {
+          const parts = rawName.split(/[\s　,，]+/).filter(Boolean)
+          const labelVariants = new Set<string>([rawName, noSpace])
+          if (parts.length === 2) {
+            labelVariants.add(`${parts[0]}, ${parts[1]}`)
+          }
+          const altValues = Array.from(labelVariants)
+            .map((v) => JSON.stringify(v))
+            .join(' ')
+          const altQuery =
+            'PREFIX foaf: <http://xmlns.com/foaf/0.1/> ' +
+            'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
+            'PREFIX ndl: <http://ndl.go.jp/dcndl/terms/> ' +
+            'PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ' +
+            'PREFIX rda: <http://RDVocab.info/ElementsGr2/> ' +
+            'SELECT DISTINCT ?uri ?label ?kana ?occ ?note WHERE { ' +
+            `VALUES ?lname { ${altValues} } ` +
+            '{ ?uri xl:prefLabel/xl:literalForm ?lname . } UNION { ?uri xl:altLabel/xl:literalForm ?lname . } ' +
+            '?uri xl:prefLabel ?pref . ' +
+            '?pref xl:literalForm ?label . ' +
+            'OPTIONAL { ?pref ndl:transcription ?kana . FILTER(LANG(?kana) = "ja-Kana") } ' +
+            'OPTIONAL { ?uri foaf:primaryTopic/rda:professionOrOccupation ?occ . } ' +
+            'OPTIONAL { ?uri skos:note ?note . } ' +
+            '} LIMIT 20'
+          rows = await runNdlSparql(altQuery)
+        }
+
         const byUri = new Map<
           string,
-          { ndlId: string; label: string; reading: string; notes: string[] }
+          { ndlId: string; label: string; reading: string; occs: string[]; notes: string[] }
         >()
         for (const r of rows) {
           const uri = String(r.uri?.value || '')
@@ -4045,14 +4116,17 @@ export default function YopacAppPage() {
           if (!ndlId) continue
           const label = String(r.label?.value || '')
           const kana = String(r.kana?.value || '')
+          const occ = String(r.occ?.value || '').trim()
           const note = String(r.note?.value || '').trim()
           const cur = byUri.get(ndlId) || {
             ndlId,
             label,
             reading: formatReadingHiragana(kana),
+            occs: [],
             notes: [],
           }
           if (!cur.reading && kana) cur.reading = formatReadingHiragana(kana)
+          if (occ && !cur.occs.includes(occ)) cur.occs.push(occ)
           if (note && !cur.notes.includes(note) && !/^https?:\/\//i.test(note)) {
             cur.notes.push(note)
           }
@@ -4069,10 +4143,9 @@ export default function YopacAppPage() {
               ndlId: c.ndlId,
               label: c.label,
               reading: c.reading,
-              description: cleanNotes[0] || '',
+              description: c.occs[0] || cleanNotes[0] || '',
               isExact:
-                Boolean(existingId && c.ndlId === existingId) ||
-                (Boolean(targetNorm) && normalizePersonNameForNdlMatch(c.label) === targetNorm),
+                Boolean(targetNorm) && normalizePersonNameForNdlMatch(c.label) === targetNorm,
             }
           })
           .sort((a, b) => {
@@ -5857,16 +5930,19 @@ export default function YopacAppPage() {
           const result = $('#authority-results')
           result.textContent = '検索中…'
           try {
+            const noSp = name.replace(/[\s　]+/g, '')
+            const vals = Array.from(new Set([noSp, name])).map((v) => JSON.stringify(v)).join(' ')
             const q =
-              'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> SELECT DISTINCT ?uri ?label WHERE { ?uri xl:prefLabel/xl:literalForm ?label . FILTER(CONTAINS(LCASE(STR(?label)), LCASE(' +
-              JSON.stringify(name) +
-              '))) } LIMIT 15'
-            const data = JSON.parse(
-              await fetchNdlViaProxy(
-                'https://id.ndl.go.jp/auth/ndla?output=json&query=' + encodeURIComponent(q)
-              )
-            )
-            const rows = data.results?.bindings || []
+              'PREFIX foaf: <http://xmlns.com/foaf/0.1/> PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
+              `SELECT DISTINCT ?uri ?label WHERE { VALUES ?fname { ${vals} } ?e foaf:name ?fname . ?uri foaf:primaryTopic ?e ; xl:prefLabel/xl:literalForm ?label . } LIMIT 15`
+            let rows = await runNdlSparql(q)
+            if (!rows.length) {
+              const q2 =
+                'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> SELECT DISTINCT ?uri ?label WHERE { ?uri xl:prefLabel/xl:literalForm ?label . FILTER(CONTAINS(LCASE(STR(?label)), LCASE(' +
+                JSON.stringify(name) +
+                '))) } LIMIT 15'
+              rows = await runNdlSparql(q2)
+            }
             result.innerHTML = rows.length
               ? rows
                   .map(

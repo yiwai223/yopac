@@ -3974,32 +3974,675 @@ export default function YopacAppPage() {
           $('#delete-publisher').onclick = () => confirmRecordDeletion('publishers', p.id)
       }
 
-      function peopleList() {
-        app.innerHTML = `<div class="page-head"><div><h1>個人・団体</h1><div class="count">${db.people.length}件</div></div>${
-          role === 'admin'
-            ? '<button type="button" id="new-person" class="primary">＋ 個人・団体を追加</button>'
-            : ''
-        }</div><div class="toolbar"><input id="people-search" type="search" placeholder="名前・よみ・原綴り・別名で検索" aria-label="人物検索"></div><div id="people-results"></div>`
-        function draw() {
-          const q = normal($('#people-search').value)
-          const a = db.people
-            .filter((p: any) => normal(personText(p)).includes(q))
+      function formatReadingHiragana(raw: any): string {
+        const cleaned = String(raw || '')
+          .replace(/[,，]\s*\d{3,4}[-–—].*$/, '')
+          .replace(/[,，、　]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+        return cleaned.replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+      }
+
+      function normalizePersonNameForNdlMatch(raw: any): string {
+        return String(raw || '')
+          .replace(/[,，]\s*(?:生没年不詳|\d{3,4}[-–—]?.*?)$/, '')
+          .replace(/[（(][^）)]*[）)]/g, '')
+          .replace(/[,，、・\s　]+/g, '')
+          .toLowerCase()
+          .trim()
+      }
+
+      async function fetchNdlCandidatesForPerson(p: any) {
+        let query = ''
+        const existingId = String(p.ndlId || '').trim()
+        if (/^\d{8,}$/.test(existingId)) {
+          query =
+            'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
+            'PREFIX ndl: <http://ndl.go.jp/dcndl/terms/> ' +
+            'PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ' +
+            'SELECT DISTINCT ?uri ?label ?kana ?note WHERE { ' +
+            `BIND(<http://id.ndl.go.jp/auth/ndlna/${existingId}> AS ?uri) ` +
+            '?uri xl:prefLabel ?pref . ?pref xl:literalForm ?label . ' +
+            'OPTIONAL { ?pref ndl:transcription ?kana . FILTER(LANG(?kana) = "ja-Kana") } ' +
+            'OPTIONAL { ?uri skos:note ?note . } ' +
+            '} LIMIT 10'
+        } else {
+          const rawName = String(p.name || '').trim()
+          if (!rawName) return []
+          const tokens = rawName
+            .split(/[\s　,，・]+/)
+            .map((t) => t.trim())
+            .filter(Boolean)
+            .slice(0, 3)
+          if (!tokens.length) return []
+          const filtersExpr = tokens
+            .map((t) => `CONTAINS(LCASE(STR(?label)), LCASE(${JSON.stringify(t)}))`)
+            .join(' && ')
+          query =
+            'PREFIX xl: <http://www.w3.org/2008/05/skos-xl#> ' +
+            'PREFIX ndl: <http://ndl.go.jp/dcndl/terms/> ' +
+            'PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ' +
+            'SELECT DISTINCT ?uri ?label ?kana ?note WHERE { ' +
+            '?uri xl:prefLabel ?pref . ?pref xl:literalForm ?label . ' +
+            'OPTIONAL { ?pref ndl:transcription ?kana . FILTER(LANG(?kana) = "ja-Kana") } ' +
+            'OPTIONAL { ?uri skos:note ?note . } ' +
+            `FILTER(${filtersExpr}) ` +
+            '} LIMIT 20'
+        }
+
+        const rawJson = await fetchNdlViaProxy(
+          'https://id.ndl.go.jp/auth/ndla?output=json&query=' + encodeURIComponent(query)
+        )
+        const data = JSON.parse(rawJson)
+        const rows = data.results?.bindings || []
+        const byUri = new Map<
+          string,
+          { ndlId: string; label: string; reading: string; notes: string[] }
+        >()
+        for (const r of rows) {
+          const uri = String(r.uri?.value || '')
+          const ndlId = uri.split('/').pop() || ''
+          if (!ndlId) continue
+          const label = String(r.label?.value || '')
+          const kana = String(r.kana?.value || '')
+          const note = String(r.note?.value || '').trim()
+          const cur = byUri.get(ndlId) || {
+            ndlId,
+            label,
+            reading: formatReadingHiragana(kana),
+            notes: [],
+          }
+          if (!cur.reading && kana) cur.reading = formatReadingHiragana(kana)
+          if (note && !cur.notes.includes(note) && !/^https?:\/\//i.test(note)) {
+            cur.notes.push(note)
+          }
+          byUri.set(ndlId, cur)
+        }
+
+        const targetNorm = normalizePersonNameForNdlMatch(p.name)
+        return Array.from(byUri.values())
+          .map((c) => {
+            const cleanNotes = c.notes
+              .map((n) => n.replace(/^出典[:：].*$/g, '').trim())
+              .filter((n) => n && n.length <= 40)
+            return {
+              ndlId: c.ndlId,
+              label: c.label,
+              reading: c.reading,
+              description: cleanNotes[0] || '',
+              isExact:
+                Boolean(existingId && c.ndlId === existingId) ||
+                (Boolean(targetNorm) && normalizePersonNameForNdlMatch(c.label) === targetNorm),
+            }
+          })
+          .sort((a, b) => {
+            if (a.isExact !== b.isExact) return a.isExact ? -1 : 1
+            return a.label.length - b.label.length
+          })
+      }
+
+      async function bulkNdlEnrichPeople(
+        onDone: () => void,
+        initialScope = 'any',
+        initialLimit = 20,
+        initialOffset = 1
+      ) {
+        if (role !== 'admin') return
+        const filterTargets = (scope: string) =>
+          db.people
+            .filter((p: any) => {
+              const noR = !String(p.reading || '').trim()
+              const noD = !String(p.description || '').trim()
+              const noI = !String(p.ndlId || '').trim()
+              if (scope === 'reading') return noR
+              if (scope === 'description') return noD
+              if (scope === 'ndlId') return noI
+              return noR || noD || noI
+            })
+            .slice()
             .sort((x: any, y: any) =>
               normal(x.reading || x.name).localeCompare(normal(y.reading || y.name), 'ja')
             )
-          $('#people-results').innerHTML = `<div class="table-wrap"><table><thead><tr><th>名前</th><th>よみ</th><th>肩書・別名</th></tr></thead><tbody>${a
-            .map(
-              (p: any) =>
-                `<tr><td><a href="#person/${p.id}">${esc(p.name)}</a></td><td>${esc(
-                  p.reading
-                )}</td><td>${esc(
-                  [p.description, ...(p.aliases || [])].filter(Boolean).join(' / ')
-                )}</td></tr>`
-            )
-            .join('')}</tbody></table></div>`
+
+        const cAny = filterTargets('any').length
+        const cR = filterTargets('reading').length
+        const cD = filterTargets('description').length
+        const cI = filterTargets('ndlId').length
+
+        openModal(
+          `<h2>NDL典拠から個人・団体を一括補完</h2>
+          <p class="muted">未入力の「よみ（ひらがな・半角スペース）」「肩書」「NDL典拠ID」を国立国会図書館の典拠データからまとめて取得し、確認してから反映します。</p>
+          <div class="form-grid" style="margin:12px 0">
+            <label class="wide">対象範囲
+              <select id="ndl-bulk-scope">
+                <option value="any" ${initialScope === 'any' ? 'selected' : ''}>よみ・肩書・NDL典拠IDのいずれかが空欄（${cAny}件）</option>
+                <option value="reading" ${initialScope === 'reading' ? 'selected' : ''}>よみが空欄（${cR}件）</option>
+                <option value="ndlId" ${initialScope === 'ndlId' ? 'selected' : ''}>NDL典拠IDが空欄（${cI}件）</option>
+                <option value="description" ${initialScope === 'description' ? 'selected' : ''}>肩書が空欄（${cD}件）</option>
+              </select>
+            </label>
+            <label>1回に照合する件数
+              <select id="ndl-bulk-limit">
+                <option value="20" ${initialLimit === 20 ? 'selected' : ''}>20件（おすすめ）</option>
+                <option value="30" ${initialLimit === 30 ? 'selected' : ''}>30件</option>
+                <option value="50" ${initialLimit === 50 ? 'selected' : ''}>50件</option>
+              </select>
+            </label>
+            <label>開始位置（何件目から）
+              <input type="number" id="ndl-bulk-offset" min="1" value="${initialOffset}">
+            </label>
+          </div>
+          <p><label class="role-check"><input type="checkbox" id="ndl-bulk-overwrite">入力済みの項目もNDLの値で上書きする（通常はオフ推奨）</label></p>
+          <div class="toolbar" style="margin-top:12px">
+            <button type="button" id="ndl-bulk-start" class="primary">NDLから候補を一括取得</button>
+            <button type="button" id="ndl-bulk-cancel">キャンセル</button>
+          </div>`
+        )
+
+        $('#ndl-bulk-cancel', modalBody).onclick = closeModal
+        $('#ndl-bulk-start', modalBody).onclick = async () => {
+          const scope = $('#ndl-bulk-scope', modalBody).value
+          const limit = Math.max(1, Number($('#ndl-bulk-limit', modalBody).value) || 20)
+          const offsetNum = Math.max(1, Number($('#ndl-bulk-offset', modalBody).value) || 1)
+          const overwrite = Boolean($('#ndl-bulk-overwrite', modalBody).checked)
+
+          const allTargets = filterTargets(scope)
+          const batch = allTargets.slice(offsetNum - 1, offsetNum - 1 + limit)
+          if (!batch.length) {
+            return notify('指定した範囲に対象の人物がありません')
+          }
+
+          let aborted = false
+          openModal(
+            `<h2>NDL典拠を照合中…</h2>
+            <div class="search-loading" style="margin:12px 0">
+              <span class="spinner" aria-hidden="true"></span>
+              <span id="ndl-bulk-progress">0 / ${batch.length}件</span>
+            </div>
+            <p class="muted" id="ndl-bulk-current"></p>
+            <div class="toolbar"><button type="button" id="ndl-bulk-stop">ここで止めて結果を確認</button></div>`
+          )
+          $('#ndl-bulk-stop', modalBody).onclick = () => {
+            aborted = true
+          }
+
+          const results: {
+            person: any
+            candidates: any[]
+            selectedIdx: number
+            checked: boolean
+            error: string
+          }[] = []
+
+          for (let i = 0; i < batch.length; i++) {
+            if (aborted) break
+            const per = batch[i]
+            const prog = $('#ndl-bulk-progress', modalBody)
+            const curEl = $('#ndl-bulk-current', modalBody)
+            if (prog) prog.textContent = `${i + 1} / ${batch.length}件`
+            if (curEl) curEl.textContent = `照合中：${per.name}`
+            try {
+              const cands = await fetchNdlCandidatesForPerson(per)
+              const exactCands = cands.filter((c) => c.isExact)
+              const autoSelect = exactCands.length === 1
+              const selectedIdx = cands.length ? 0 : -1
+              results.push({
+                person: per,
+                candidates: cands,
+                selectedIdx,
+                checked: autoSelect,
+                error: '',
+              })
+            } catch (err: any) {
+              results.push({
+                person: per,
+                candidates: [],
+                selectedIdx: -1,
+                checked: false,
+                error: err?.message || '取得エラー',
+              })
+            }
+            if (i < batch.length - 1 && !aborted) {
+              await new Promise((r) => setTimeout(r, 180))
+            }
+          }
+
+          const foundCount = results.filter((r) => r.candidates.length > 0).length
+          const exactCount = results.filter((r) => r.checked).length
+          const shoulders = shoulderOptions()
+
+          const computeNextVal = (curVal: string, candVal: string) => {
+            if (overwrite) return candVal || curVal
+            return String(curVal || '').trim() ? curVal : candVal || ''
+          }
+
+          openModal(
+            `<h2>NDL一括補完の確認（${results.length}件照合）</h2>
+            <p class="muted">候補あり：${foundCount}件 ／ 確定一致（自動チェック済み）：${exactCount}件。同姓同名が複数ある行はプルダウンで選んでからチェックを入れてください。よみはひらがな・半角スペース区切りに自動整形されます。</p>
+            <datalist id="ndl-bulk-shoulders">${shoulders
+              .map((opt: string) => `<option value="${esc(opt)}">`)
+              .join('')}</datalist>
+            <div class="toolbar" style="margin:8px 0">
+              <button type="button" class="tiny" id="ndl-check-exact">確定一致のみチェック</button>
+              <button type="button" class="tiny" id="ndl-check-all">候補ありを全チェック</button>
+              <button type="button" class="tiny" id="ndl-check-none">チェック全解除</button>
+            </div>
+            <div class="table-wrap" style="max-height:46vh;overflow:auto;margin-bottom:12px">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:40px">反映</th>
+                    <th>名前</th>
+                    <th>NDL候補</th>
+                    <th>よみ</th>
+                    <th>肩書</th>
+                    <th>NDL典拠ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${results
+                    .map((r, i) => {
+                      const cand = r.selectedIdx >= 0 ? r.candidates[r.selectedIdx] : null
+                      const nextReading = cand
+                        ? computeNextVal(r.person.reading, cand.reading)
+                        : r.person.reading || ''
+                      const nextDesc = cand
+                        ? computeNextVal(r.person.description, cand.description)
+                        : r.person.description || ''
+                      const nextId = cand
+                        ? computeNextVal(r.person.ndlId, cand.ndlId)
+                        : r.person.ndlId || ''
+                      const candUi = r.error
+                        ? `<span class="danger">${esc(r.error)}</span>`
+                        : !r.candidates.length
+                        ? '<span class="muted">候補なし</span>'
+                        : `<select data-ndl-cand="${i}" style="font-size:12px;padding:4px 6px;min-width:170px">${r.candidates
+                            .map(
+                              (c: any, ci: number) =>
+                                `<option value="${ci}" ${ci === r.selectedIdx ? 'selected' : ''}>${
+                                  c.isExact ? '★ ' : ''
+                                }${esc(c.label)}${c.reading ? ' / ' + esc(c.reading) : ''} (${esc(
+                                  c.ndlId
+                                )})</option>`
+                            )
+                            .join('')}</select>`
+                      return `<tr>
+                        <td><input type="checkbox" data-ndl-apply="${i}" ${
+                          r.checked ? 'checked' : ''
+                        } ${!r.candidates.length ? 'disabled' : ''}></td>
+                        <td><strong>${esc(r.person.name)}</strong></td>
+                        <td>${candUi}</td>
+                        <td><input type="text" data-ndl-reading="${i}" value="${esc(
+                          nextReading
+                        )}" placeholder="ひらがな" style="font-size:13px;padding:5px 7px;min-width:120px"></td>
+                        <td><input type="text" list="ndl-bulk-shoulders" data-ndl-desc="${i}" value="${esc(
+                          nextDesc
+                        )}" placeholder="肩書" style="font-size:13px;padding:5px 7px;min-width:110px"></td>
+                        <td><input type="text" data-ndl-id="${i}" value="${esc(
+                          nextId
+                        )}" placeholder="典拠ID" style="font-size:13px;padding:5px 7px;min-width:95px"></td>
+                      </tr>`
+                    })
+                    .join('')}
+                </tbody>
+              </table>
+            </div>
+            <div class="toolbar">
+              <button type="button" id="ndl-bulk-apply" class="primary">チェックした候補を一括反映して保存</button>
+              ${
+                offsetNum - 1 + results.length < allTargets.length
+                  ? `<button type="button" id="ndl-bulk-next">次の${limit}件へ（${
+                      offsetNum + results.length
+                    }件目〜）</button>`
+                  : ''
+              }
+            </div>`
+          )
+
+          $$('[data-ndl-cand]', modalBody).forEach((sel: any) => {
+            sel.onchange = () => {
+              const i = Number(sel.dataset.ndlCand)
+              const ci = Number(sel.value)
+              const r = results[i]
+              const cand = r.candidates[ci]
+              if (!cand) return
+              const rInput = $(`[data-ndl-reading="${i}"]`, modalBody)
+              const dInput = $(`[data-ndl-desc="${i}"]`, modalBody)
+              const idInput = $(`[data-ndl-id="${i}"]`, modalBody)
+              const cb = $(`[data-ndl-apply="${i}"]`, modalBody)
+              if (rInput) rInput.value = computeNextVal(r.person.reading, cand.reading)
+              if (dInput) dInput.value = computeNextVal(r.person.description, cand.description)
+              if (idInput) idInput.value = computeNextVal(r.person.ndlId, cand.ndlId)
+              if (cb) cb.checked = true
+            }
+          })
+
+          $('#ndl-check-exact', modalBody).onclick = () => {
+            results.forEach((r, i) => {
+              const cb = $(`[data-ndl-apply="${i}"]`, modalBody)
+              if (cb && !cb.disabled) cb.checked = r.checked
+            })
+          }
+          $('#ndl-check-all', modalBody).onclick = () => {
+            results.forEach((r, i) => {
+              const cb = $(`[data-ndl-apply="${i}"]`, modalBody)
+              if (cb && !cb.disabled) cb.checked = true
+            })
+          }
+          $('#ndl-check-none', modalBody).onclick = () => {
+            results.forEach((_, i) => {
+              const cb = $(`[data-ndl-apply="${i}"]`, modalBody)
+              if (cb) cb.checked = false
+            })
+          }
+
+          const applySelected = () => {
+            let updated = 0
+            results.forEach((r, i) => {
+              const cb = $(`[data-ndl-apply="${i}"]`, modalBody)
+              if (!cb || !cb.checked) return
+              const target = db.people.find((x: any) => x.id === r.person.id)
+              if (!target) return
+              const nextR = formatReadingHiragana($(`[data-ndl-reading="${i}"]`, modalBody)?.value)
+              const nextD = String($(`[data-ndl-desc="${i}"]`, modalBody)?.value || '').trim()
+              const nextI = String($(`[data-ndl-id="${i}"]`, modalBody)?.value || '').trim()
+              if (nextR !== (target.reading || '') || nextD !== (target.description || '') || nextI !== (target.ndlId || '')) {
+                target.reading = nextR
+                target.description = nextD
+                target.ndlId = nextI
+                if (nextD) rememberShoulder(nextD)
+                updated++
+              }
+            })
+            if (updated > 0) {
+              persist()
+              notify(`${updated}件の人物情報を更新して保存しました`)
+            } else {
+              notify('変更された項目はありませんでした')
+            }
+            return updated
+          }
+
+          $('#ndl-bulk-apply', modalBody).onclick = () => {
+            applySelected()
+            closeModal()
+            onDone()
+          }
+          if ($('#ndl-bulk-next', modalBody)) {
+            $('#ndl-bulk-next', modalBody).onclick = () => {
+              applySelected()
+              bulkNdlEnrichPeople(onDone, scope, limit, offsetNum + results.length)
+            }
+          }
         }
-        $('#people-search').oninput = draw
+      }
+
+      function peopleList() {
+        const isAdmin = role === 'admin'
+        let inlineEditMode = false
+        let displayLimit = 100
+        const pendingEdits = new Map<
+          string,
+          { reading: string; description: string; ndlId: string }
+        >()
+
+        app.innerHTML = `<div class="page-head"><div><h1>個人・団体</h1><div class="count" id="people-count">${db.people.length}件</div></div>${
+          isAdmin
+            ? '<div class="detail-actions"><button type="button" id="bulk-ndl-people" class="secondary">NDLから一括補完</button><button type="button" id="toggle-people-inline">一覧で直接編集</button><button type="button" id="new-person" class="primary">＋ 個人・団体を追加</button></div>'
+            : ''
+        }</div><div class="toolbar"><input id="people-search" type="search" placeholder="名前・よみ・原綴り・別名で検索" aria-label="人物検索">${
+          isAdmin
+            ? `<select id="people-missing-filter" aria-label="未入力で絞り込み">
+                <option value="">すべて表示</option>
+                <option value="any">未入力あり（よみ・肩書・NDL ID）</option>
+                <option value="reading">よみが空欄</option>
+                <option value="description">肩書が空欄</option>
+                <option value="ndlId">NDL典拠IDが空欄</option>
+              </select>`
+            : ''
+        }</div><div id="people-inline-bar" class="section-note" style="display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"></div><div id="people-results"></div>`
+
+        const updateInlineBar = () => {
+          const bar = $('#people-inline-bar')
+          if (!bar) return
+          if (!inlineEditMode || !isAdmin) {
+            bar.style.display = 'none'
+            bar.innerHTML = ''
+            return
+          }
+          bar.style.display = 'flex'
+          bar.innerHTML = `<span>一覧インライン編集モード：よみは保存時にひらがな・半角スペース区切りに自動整形されます（未保存の変更：<strong>${pendingEdits.size}件</strong>）</span><div class="inline-links"><button type="button" id="save-people-inline" class="primary">変更をまとめて保存（${pendingEdits.size}件）</button><button type="button" id="cancel-people-inline">編集を終了</button></div>`
+          $('#save-people-inline', bar).onclick = () => {
+            if (!pendingEdits.size) {
+              notify('変更された項目はありません')
+              return
+            }
+            let savedCount = 0
+            pendingEdits.forEach((vals, pid) => {
+              const target = db.people.find((x: any) => x.id === pid)
+              if (!target) return
+              const nextR = formatReadingHiragana(vals.reading)
+              const nextD = String(vals.description || '').trim()
+              const nextI = String(vals.ndlId || '').trim()
+              target.reading = nextR
+              target.description = nextD
+              target.ndlId = nextI
+              if (nextD) rememberShoulder(nextD)
+              savedCount++
+            })
+            pendingEdits.clear()
+            if (savedCount > 0) {
+              persist()
+              notify(`${savedCount}件の人物情報をまとめて保存しました`)
+            }
+            updateInlineBar()
+            draw()
+          }
+          $('#cancel-people-inline', bar).onclick = () => {
+            pendingEdits.clear()
+            inlineEditMode = false
+            const toggleBtn = $('#toggle-people-inline')
+            if (toggleBtn) toggleBtn.textContent = '一覧で直接編集'
+            updateInlineBar()
+            draw()
+          }
+        }
+
+        function draw() {
+          const q = normal($('#people-search').value)
+          const missingMode = isAdmin ? $('#people-missing-filter')?.value || '' : ''
+          const a = db.people
+            .filter((p: any) => {
+              if (q && !normal(personText(p)).includes(q)) return false
+              if (missingMode) {
+                const edit = pendingEdits.get(p.id)
+                const curR = edit ? edit.reading : p.reading
+                const curD = edit ? edit.description : p.description
+                const curI = edit ? edit.ndlId : p.ndlId
+                if (missingMode === 'reading' && String(curR || '').trim()) return false
+                if (missingMode === 'description' && String(curD || '').trim()) return false
+                if (missingMode === 'ndlId' && String(curI || '').trim()) return false
+                if (
+                  missingMode === 'any' &&
+                  String(curR || '').trim() &&
+                  String(curD || '').trim() &&
+                  String(curI || '').trim()
+                )
+                  return false
+              }
+              return true
+            })
+            .sort((x: any, y: any) =>
+              normal(x.reading || x.name).localeCompare(normal(y.reading || y.name), 'ja')
+            )
+
+          const countEl = $('#people-count')
+          if (countEl) {
+            countEl.textContent =
+              a.length === db.people.length
+                ? `${db.people.length}件`
+                : `${a.length}件 / 全${db.people.length}件`
+          }
+
+          const sliced = a.slice(0, displayLimit)
+          const moreBtn =
+            a.length > displayLimit
+              ? `<div class="pagination"><button type="button" id="people-show-more">さらに表示（残り${
+                  a.length - displayLimit
+                }件）</button></div>`
+              : ''
+
+          if (inlineEditMode && isAdmin) {
+            const shoulders = shoulderOptions()
+            $('#people-results').innerHTML = `<datalist id="people-shoulder-datalist">${shoulders
+              .map((opt: string) => `<option value="${esc(opt)}">`)
+              .join(
+                ''
+              )}</datalist><div class="table-wrap"><table><thead><tr><th>名前</th><th>よみ（ひらがな）</th><th>肩書など</th><th>NDL典拠ID</th><th>取得</th></tr></thead><tbody>${sliced
+              .map((p: any) => {
+                const cur = pendingEdits.get(p.id) || {
+                  reading: p.reading || '',
+                  description: p.description || '',
+                  ndlId: p.ndlId || '',
+                }
+                return `<tr data-inline-pid="${esc(p.id)}">
+                  <td><a href="#person/${p.id}">${esc(p.name)}</a></td>
+                  <td><input type="text" data-inline-field="reading" value="${esc(
+                    cur.reading
+                  )}" placeholder="例：ほし しんいち" style="padding:6px 8px;min-width:140px"></td>
+                  <td><input type="text" list="people-shoulder-datalist" data-inline-field="description" value="${esc(
+                    cur.description
+                  )}" placeholder="例：小説家" style="padding:6px 8px;min-width:130px"></td>
+                  <td><input type="text" data-inline-field="ndlId" value="${esc(
+                    cur.ndlId
+                  )}" placeholder="例：00012648" style="padding:6px 8px;min-width:105px"></td>
+                  <td><button type="button" class="tiny" data-inline-ndl="${esc(
+                    p.id
+                  )}">NDL</button></td>
+                </tr>`
+              })
+              .join('')}</tbody></table></div>${
+              !sliced.length ? '<p class="empty">該当する人物・団体がありません。</p>' : ''
+            }${moreBtn}`
+
+            $$('tr[data-inline-pid]', $('#people-results')).forEach((tr: any) => {
+              const pid = tr.dataset.inlinePid
+              const orig = db.people.find((x: any) => x.id === pid)
+              const syncRow = () => {
+                const reading = $('[data-inline-field="reading"]', tr)?.value || ''
+                const description = $('[data-inline-field="description"]', tr)?.value || ''
+                const ndlId = $('[data-inline-field="ndlId"]', tr)?.value || ''
+                if (
+                  orig &&
+                  reading === (orig.reading || '') &&
+                  description === (orig.description || '') &&
+                  ndlId === (orig.ndlId || '')
+                ) {
+                  pendingEdits.delete(pid)
+                } else {
+                  pendingEdits.set(pid, { reading, description, ndlId })
+                }
+                const saveBtn = $('#save-people-inline')
+                if (saveBtn) saveBtn.textContent = `変更をまとめて保存（${pendingEdits.size}件）`
+                const barStrong = $('#people-inline-bar strong')
+                if (barStrong) barStrong.textContent = `${pendingEdits.size}件`
+              }
+              $$('[data-inline-field]', tr).forEach((inp: any) => {
+                inp.oninput = syncRow
+                if (inp.dataset.inlineField === 'reading') {
+                  inp.onblur = () => {
+                    const formatted = formatReadingHiragana(inp.value)
+                    if (formatted !== inp.value) {
+                      inp.value = formatted
+                      syncRow()
+                    }
+                  }
+                }
+              })
+            })
+
+            $$('[data-inline-ndl]', $('#people-results')).forEach((btn: any) => {
+              btn.onclick = () => {
+                const pid = btn.dataset.inlineNdl
+                const target = db.people.find((x: any) => x.id === pid)
+                if (!target) return
+                const draft = structuredClone(target)
+                const cur = pendingEdits.get(pid)
+                if (cur) {
+                  draft.reading = cur.reading
+                  draft.description = cur.description
+                  draft.ndlId = cur.ndlId
+                }
+                lookupAuthority(draft, () => {
+                  pendingEdits.set(pid, {
+                    reading: formatReadingHiragana(draft.reading),
+                    description: draft.description || '',
+                    ndlId: draft.ndlId || '',
+                  })
+                  updateInlineBar()
+                  draw()
+                })
+              }
+            })
+          } else {
+            $('#people-results').innerHTML = `<div class="table-wrap"><table><thead><tr><th>名前</th><th>よみ</th><th>肩書・別名</th>${
+              isAdmin ? '<th>NDL典拠ID</th>' : ''
+            }</tr></thead><tbody>${sliced
+              .map(
+                (p: any) =>
+                  `<tr><td><a href="#person/${p.id}">${esc(p.name)}</a></td><td>${esc(
+                    p.reading
+                  )}</td><td>${esc(
+                    [p.description, ...(p.aliases || [])].filter(Boolean).join(' / ')
+                  )}</td>${
+                    isAdmin
+                      ? `<td>${
+                          p.ndlId
+                            ? `<a href="https://id.ndl.go.jp/auth/ndlna/${encodeURIComponent(
+                                p.ndlId
+                              )}" target="_blank" rel="noopener">${esc(p.ndlId)}</a>`
+                            : '<span class="muted">—</span>'
+                        }</td>`
+                      : ''
+                  }</tr>`
+              )
+              .join('')}</tbody></table></div>${
+              !sliced.length ? '<p class="empty">該当する人物・団体がありません。</p>' : ''
+            }${moreBtn}`
+          }
+
+          if ($('#people-show-more')) {
+            $('#people-show-more').onclick = () => {
+              displayLimit += 100
+              draw()
+            }
+          }
+        }
+
+        $('#people-search').oninput = () => {
+          displayLimit = 100
+          draw()
+        }
+        if ($('#people-missing-filter')) {
+          $('#people-missing-filter').onchange = () => {
+            displayLimit = 100
+            draw()
+          }
+        }
         if ($('#new-person')) $('#new-person').onclick = () => editPerson(null)
+        if ($('#bulk-ndl-people')) {
+          $('#bulk-ndl-people').onclick = () => bulkNdlEnrichPeople(draw)
+        }
+        if ($('#toggle-people-inline')) {
+          $('#toggle-people-inline').onclick = () => {
+            inlineEditMode = !inlineEditMode
+            $('#toggle-people-inline').textContent = inlineEditMode
+              ? '通常表示に戻す'
+              : '一覧で直接編集'
+            updateInlineBar()
+            draw()
+          }
+        }
         draw()
       }
 
@@ -5164,10 +5807,11 @@ export default function YopacAppPage() {
           const pref = [...xml.getElementsByTagNameNS('*', 'prefLabel')][0]
           const name =
             tagValues(pref || xml, 'literalForm')[0] || tagValues(xml, 'name')[0] || ''
-          const kana =
+          const rawKana =
             [...(pref || xml).getElementsByTagNameNS('*', 'transcription')].find(
               (e: any) => (e.getAttribute('xml:lang') || '') === 'ja-Kana'
             )?.textContent || ''
+          const kana = formatReadingHiragana(rawKana)
           const aliases = [...xml.getElementsByTagNameNS('*', 'altLabel')].flatMap((e) =>
             tagValues(e, 'literalForm')
           )

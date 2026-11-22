@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js'
 
 const ADMIN_EMAIL = 'yiwai223@gmail.com'
 const LOG_BUCKET = 'admin-logs'
@@ -20,10 +20,15 @@ function getAdminClient() {
   })
 }
 
-async function verifyUser(request: Request) {
+type AuthResult =
+  | { ok: false; error: NextResponse }
+  | { ok: true; adminClient: SupabaseClient; caller: User }
+
+async function verifyUser(request: Request): Promise<AuthResult> {
   const adminClient = getAdminClient()
   if (!adminClient) {
     return {
+      ok: false,
       error: NextResponse.json(
         {
           error:
@@ -38,6 +43,7 @@ async function verifyUser(request: Request) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : ''
   if (!token) {
     return {
+      ok: false,
       error: NextResponse.json({ error: '認証トークンがありません。再ログインしてください。' }, { status: 401 }),
     }
   }
@@ -45,36 +51,37 @@ async function verifyUser(request: Request) {
   const { data, error } = await adminClient.auth.getUser(token)
   if (error || !data?.user) {
     return {
+      ok: false,
       error: NextResponse.json({ error: '認証の確認に失敗しました。再ログインしてください。' }, { status: 401 }),
     }
   }
 
-  return { adminClient, caller: data.user }
+  return { ok: true, adminClient, caller: data.user }
 }
 
-async function verifyAdmin(request: Request) {
+async function verifyAdmin(request: Request): Promise<AuthResult> {
   const auth = await verifyUser(request)
-  if ('error' in auth && auth.error) return auth
-  const { adminClient, caller } = auth
+  if (!auth.ok) return auth
 
-  const email = (caller.email || '').trim().toLowerCase()
+  const email = (auth.caller.email || '').trim().toLowerCase()
   if (email !== ADMIN_EMAIL.toLowerCase()) {
     return {
+      ok: false,
       error: NextResponse.json({ error: '管理者権限が必要です。' }, { status: 403 }),
     }
   }
 
-  return { adminClient, caller }
+  return auth
 }
 
-async function ensureLogBucket(adminClient: any) {
+async function ensureLogBucket(adminClient: SupabaseClient) {
   const { data } = await adminClient.storage.getBucket(LOG_BUCKET)
   if (!data) {
     await adminClient.storage.createBucket(LOG_BUCKET, { public: false })
   }
 }
 
-async function readLoginLogs(adminClient: any): Promise<any[]> {
+async function readLoginLogs(adminClient: SupabaseClient): Promise<any[]> {
   try {
     const { data, error } = await adminClient.storage.from(LOG_BUCKET).download(LOG_PATH)
     if (error || !data) return []
@@ -86,7 +93,7 @@ async function readLoginLogs(adminClient: any): Promise<any[]> {
   }
 }
 
-async function writeLoginLogs(adminClient: any, logs: any[]) {
+async function writeLoginLogs(adminClient: SupabaseClient, logs: any[]) {
   await ensureLogBucket(adminClient)
   const payload = JSON.stringify(logs.slice(0, MAX_LOGS))
   await adminClient.storage
@@ -123,7 +130,7 @@ function summarizeUserAgent(ua: string) {
 
 export async function GET(request: Request) {
   const auth = await verifyAdmin(request)
-  if ('error' in auth && auth.error) return auth.error
+  if (!auth.ok) return auth.error
   const { adminClient } = auth
 
   const [usersRes, loginLogs] = await Promise.all([
@@ -157,7 +164,7 @@ export async function GET(request: Request) {
 // ログイン記録の追加（認証済みユーザー本人のみ記録、閲覧は管理者専用）
 export async function PUT(request: Request) {
   const auth = await verifyUser(request)
-  if ('error' in auth && auth.error) return auth.error
+  if (!auth.ok) return auth.error
   const { adminClient, caller } = auth
 
   let body: { mode?: string } = {}
@@ -207,7 +214,7 @@ export async function PUT(request: Request) {
 
 export async function POST(request: Request) {
   const auth = await verifyAdmin(request)
-  if ('error' in auth && auth.error) return auth.error
+  if (!auth.ok) return auth.error
   const { adminClient } = auth
 
   let body: { email?: string; password?: string }
@@ -247,7 +254,7 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   const auth = await verifyAdmin(request)
-  if ('error' in auth && auth.error) return auth.error
+  if (!auth.ok) return auth.error
   const { adminClient, caller } = auth
 
   let body: { id?: string; email?: string; password?: string }
@@ -308,7 +315,7 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   const auth = await verifyAdmin(request)
-  if ('error' in auth && auth.error) return auth.error
+  if (!auth.ok) return auth.error
   const { adminClient, caller } = auth
 
   let body: { id?: string; action?: string }

@@ -99,6 +99,9 @@ body{margin:0;height:auto!important;min-height:100%!important;overflow-y:visible
 .yopac-root #close-modal{flex-shrink:0}
 .yopac-root .picker-check-label{display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0;cursor:pointer}
 .yopac-root .picker-check-label input[type=checkbox]{margin-top:3px;flex-shrink:0}
+@keyframes yopac-spin{to{transform:rotate(360deg)}}
+.yopac-root .search-loading{display:flex;align-items:center;justify-content:center;gap:12px;padding:28px 20px;background:white;border:1px solid var(--line);border-radius:10px;color:#284333;font-weight:600;margin:14px 0}
+.yopac-root .spinner{width:20px;height:20px;border:3px solid #d5e3d8;border-top-color:var(--deep);border-radius:50%;animation:yopac-spin .8s linear infinite;flex-shrink:0}
 .yopac-root dialog::backdrop{background:#12291a66}
 .yopac-root video{width:100%;max-height:280px;background:#17251b;border-radius:8px;object-fit:cover;margin:8px 0}
 .yopac-root .link-button{border:0;padding:0;background:transparent;color:#245d97;text-align:left;font-size:inherit}
@@ -492,6 +495,7 @@ export default function YopacAppPage() {
       let hasMoreServerBooks = false
       let serverOffset = 0
       let isListSearching = false
+      let isAppendingSearch = false
       let hasSearched = false
       let searchTotalCount: number | null = null
       let advancedAllMatches: any[] = []
@@ -1324,8 +1328,12 @@ export default function YopacAppPage() {
       // 簡易検索または詳細検索（現在表示中のモードの条件のみ）で Supabase へ問い合わせる
       async function runServerSearch({ append = false }: { append?: boolean } = {}) {
         isListSearching = true
+        isAppendingSearch = append
         hasSearched = true
         saveStateLabel('検索中…')
+        if (!location.hash || location.hash === '#books') {
+          listBooks()
+        }
 
         try {
           if (advanced) {
@@ -1524,6 +1532,7 @@ export default function YopacAppPage() {
           notify('検索中にエラーが発生しました')
         } finally {
           isListSearching = false
+          isAppendingSearch = false
           listBooks()
         }
       }
@@ -1608,7 +1617,9 @@ export default function YopacAppPage() {
       function listBooks() {
         const visible = hasSearched ? lastResults : []
         let countText = ''
-        if (hasSearched) {
+        if (isListSearching && !isAppendingSearch) {
+          countText = '検索しています…'
+        } else if (hasSearched) {
           let countHeader = `検索結果：${visible.length}冊`
           if (searchTotalCount !== null) {
             countHeader =
@@ -1627,8 +1638,12 @@ export default function YopacAppPage() {
           }`
         }
 
-        const resultsMarkup = hasSearched
-          ? `<div class="desktop-list table-wrap"><table><thead><tr><th>題名</th><th>著者等</th><th>出版社</th><th>分類・主題分野</th><th>状態</th></tr></thead><tbody>${visible
+        const loadingBanner = `<div class="search-loading" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>検索しています…</span></div>`
+        const resultsMarkup =
+          isListSearching && !isAppendingSearch
+            ? loadingBanner
+            : hasSearched
+            ? `<div class="desktop-list table-wrap"><table><thead><tr><th>題名</th><th>著者等</th><th>出版社</th><th>分類・主題分野</th><th>状態</th></tr></thead><tbody>${visible
               .map(
                 (b: any) =>
                   `<tr><td><div class="thumb-cell">${
@@ -1685,7 +1700,7 @@ export default function YopacAppPage() {
                   }>${isListSearching ? '読み込み中...' : 'さらに100件を読み込む'}</button></div>`
                 : ''
             }`
-          : ''
+            : ''
 
         const markup = `<div class="page-head"><div><h1>所蔵リスト</h1>${
           countText ? `<div class="count">${countText}</div>` : ''
@@ -2495,14 +2510,23 @@ export default function YopacAppPage() {
         await ensureWorksLoaded()
         ensureWorkFormats()
         const formatValues = db.workFormats || []
-        const bookAuthors = (bookDraftObj.people || [])
-          .map((m: any) => person(m.id))
-          .filter(Boolean)
+        const bookAuthorEntries = (bookDraftObj.people || [])
+          .map((m: any) => {
+            const per = person(m.id)
+            if (!per) return null
+            return {
+              person: per,
+              roles: Array.isArray(m.roles) ? [...m.roles] : [],
+              printed: m.printed || '',
+            }
+          })
+          .filter(Boolean) as { person: any; roles: string[]; printed: string }[]
+        const bookAuthors = bookAuthorEntries.map((e) => e.person)
         const bookAuthorByNorm = new Map<string, any>(
-          bookAuthors.map((p: any) => [normal(p.name), p])
+          bookAuthorEntries.map((e) => [normal(e.person.name), e.person])
         )
         const inheritChecked =
-          initialInherit !== undefined ? initialInherit : bookAuthors.length > 0
+          initialInherit !== undefined ? initialInherit : bookAuthorEntries.length > 0
 
         function describePersonCandidate(per: any) {
           const parts: string[] = []
@@ -2544,9 +2568,17 @@ export default function YopacAppPage() {
                 <input type="checkbox" id="bulk-inherit-authors" ${
                   inheritChecked ? 'checked' : ''
                 }>
-                この書籍の著者を自動で引き継ぐ${
-                  bookAuthors.length
-                    ? `（${esc(bookAuthors.map((p: any) => p.name).join('・'))}）`
+                この書籍の著作者・役割を自動で引き継ぐ${
+                  bookAuthorEntries.length
+                    ? `（${esc(
+                        bookAuthorEntries
+                          .map((e) =>
+                            e.roles.length
+                              ? `${e.person.name}［${e.roles.join('・')}］`
+                              : e.person.name
+                          )
+                          .join('、')
+                      )}）`
                     : '（書籍に著者未設定）'
                 }
               </label>
@@ -2582,15 +2614,21 @@ export default function YopacAppPage() {
             const authorPart = (parts[1] || '').trim()
             const formatPart = (parts[2] || '').trim()
 
-            let authorNames: string[] = []
+            let authorItems: { name: string; roles: string[]; printed: string }[] = []
             if (authorPart) {
-              authorNames = authorPart
+              authorItems = authorPart
                 .split(/[、,&＆]/)
                 .map((s) => s.trim())
                 .filter(Boolean)
-            } else if (inheritAuthors && bookAuthors.length) {
-              authorNames = bookAuthors.map((p: any) => p.name)
+                .map((name) => ({ name, roles: ['著者'], printed: '' }))
+            } else if (inheritAuthors && bookAuthorEntries.length) {
+              authorItems = bookAuthorEntries.map((e) => ({
+                name: e.person.name,
+                roles: [...e.roles],
+                printed: e.printed || '',
+              }))
             }
+            const authorNames = authorItems.map((a) => a.name)
 
             let resolvedFormat = defaultFormat
             if (formatPart) {
@@ -2614,6 +2652,7 @@ export default function YopacAppPage() {
             return {
               title,
               authorNames,
+              authorItems,
               format: resolvedFormat,
               existingWorkId: matchedWork ? matchedWork.id : '',
             }
@@ -2736,13 +2775,19 @@ export default function YopacAppPage() {
                     <tr data-bulk-row="${i}">
                       <td><strong>${esc(row.title)}</strong></td>
                       <td>${
-                        row.authorNames.length
-                          ? `<div style="display:flex;flex-wrap:wrap;gap:6px">${row.authorNames
+                        row.authorItems.length
+                          ? `<div style="display:flex;flex-wrap:wrap;gap:6px">${row.authorItems
                               .map(
-                                (aName: string, aIdx: number) => `
+                                (aItem: any, aIdx: number) => `
                                 <label style="display:inline-flex;align-items:center;gap:5px;background:#f4f7f4;padding:4px 8px;border-radius:5px;border:1px solid #d5e3d8;cursor:pointer;font-size:13px">
                                   <input type="checkbox" data-bulk-row-author="${i}" data-author-idx="${aIdx}" checked style="width:16px;height:16px;margin:0">
-                                  <span>${esc(aName)}</span>
+                                  <span>${esc(aItem.name)}${
+                                    aItem.roles && aItem.roles.length
+                                      ? `<span class="role" style="margin-left:4px">${esc(
+                                          aItem.roles.join('・')
+                                        )}</span>`
+                                      : ''
+                                  }</span>
                                 </label>`
                               )
                               .join('')}</div>`
@@ -2865,15 +2910,19 @@ export default function YopacAppPage() {
               }
 
               const checkedBoxes = $$(`input[data-bulk-row-author="${i}"]:checked`, modalBody)
-              const selectedAuthorNames = checkedBoxes.map(
-                (cb: any) => row.authorNames[Number(cb.dataset.authorIdx)]
-              )
+              const selectedAuthorItems = checkedBoxes
+                .map((cb: any) => row.authorItems[Number(cb.dataset.authorIdx)])
+                .filter(Boolean)
 
               const workPeople: any[] = []
-              for (const aName of selectedAuthorNames) {
-                const pid = resolvedAuthorIdByNorm.get(normal(aName))
+              for (const aItem of selectedAuthorItems) {
+                const pid = resolvedAuthorIdByNorm.get(normal(aItem.name))
                 if (pid && !workPeople.some((m) => m.id === pid)) {
-                  workPeople.push({ id: pid, roles: ['著者'], printed: '' })
+                  workPeople.push({
+                    id: pid,
+                    roles: Array.isArray(aItem.roles) ? [...aItem.roles] : [],
+                    printed: aItem.printed || '',
+                  })
                 }
               }
 
@@ -2901,7 +2950,11 @@ export default function YopacAppPage() {
           }
         }
       }
-      async function createRelated(type: 'person' | 'publisher' | 'work', onSelect: any) {
+      async function createRelated(
+        type: 'person' | 'publisher' | 'work',
+        onSelect: any,
+        initialWorkPeople: any[] = []
+      ) {
         if (type === 'work') await ensureWorksLoaded()
         const config = {
           person: {
@@ -2977,7 +3030,16 @@ export default function YopacAppPage() {
 
         const form = $('#related-create-form')
         bindShoulderField(form)
-        const selectedWorkPeople: any[] = []
+        const selectedWorkPeople: any[] =
+          type === 'work' && Array.isArray(initialWorkPeople)
+            ? initialWorkPeople
+                .filter((m: any) => m && m.id && person(m.id))
+                .map((m: any) => ({
+                  id: m.id,
+                  roles: Array.isArray(m.roles) ? [...m.roles] : [],
+                  printed: m.printed || '',
+                }))
+            : []
         if (type === 'work') {
           const wpList = $('#related-work-people-list', form)
           const wpSearch = $('#related-work-person-search', form)
@@ -3600,10 +3662,14 @@ export default function YopacAppPage() {
         }
         $('#new-linked-work').onclick = () => {
           read()
-          createRelated('work', (record: any) => {
-            if (!b.works.includes(record.id)) b.works.push(record.id)
-            drawBookForm()
-          })
+          createRelated(
+            'work',
+            (record: any) => {
+              if (!b.works.includes(record.id)) b.works.push(record.id)
+              drawBookForm()
+            },
+            b.people || []
+          )
         }
         $('#bulk-add-works').onclick = () => {
           read()
@@ -4414,10 +4480,29 @@ export default function YopacAppPage() {
         }`
       }
 
+      async function adminUsersRequest(method: string, body?: any) {
+        const { data: sessionData } = await supabase.auth.getSession()
+        const token = sessionData?.session?.access_token
+        if (!token) throw new Error('セッションが切れています。再ログインしてください。')
+        const res = await fetch('/api/admin/users', {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          throw new Error(json.error || `ユーザー操作に失敗しました（HTTP ${res.status}）`)
+        }
+        return json
+      }
+
       async function settings() {
         await ensureWorksLoaded()
         ensureWorkFormats()
-        app.innerHTML = `<div class="page-head"><h1>管理</h1></div><div class="cards"><section class="panel"><h2>役割ラベル</h2><div id="role-management"></div><div class="toolbar"><input id="new-role" aria-label="新しい役割"><button type="button" id="add-role">追加</button></div></section><section class="panel"><h2>状態の種類</h2><div id="status-management"></div><div class="toolbar"><input id="new-status" aria-label="新しい状態"><button type="button" id="add-status">追加</button></div></section><section class="panel"><h2>作品の形式</h2><div id="format-management"></div><div class="toolbar"><input id="new-format" aria-label="新しい作品の形式"><button type="button" id="add-format">追加</button></div></section></div><section class="panel"><h2>書影（表紙画像）の一括取込</h2><p class="muted">お手元の書影ZIPファイル（<code>YOPAC_書影_001.zip</code> など複数選択可）または展開済みのJPG画像を選択すると、Supabase Storage（<code>covers</code>バケット）へ一括保存され、全蔵書の書影が表示されます。</p><div class="toolbar"><label class="button primary">書影ZIP / 画像ファイルを選択して取込<input id="cover-batch-input" type="file" accept=".zip,image/*" multiple hidden></label></div><p id="image-import-status" class="muted" role="status"></p></section><section class="panel"><h2>保存した検索</h2>${
+        app.innerHTML = `<div class="page-head"><h1>管理</h1></div><section class="panel"><h2>利用者アカウント管理</h2><p class="muted">ログインできるユーザーのメールアドレス・パスワードを登録、変更、削除できます。</p><form id="add-user-form" class="toolbar" style="margin-top:10px"><input type="email" id="new-user-email" placeholder="メールアドレス" aria-label="新しいユーザーのメールアドレス" required style="flex:1;min-width:200px"><input type="password" id="new-user-password" placeholder="パスワード（6文字以上）" aria-label="新しいユーザーのパスワード" minlength="6" required style="flex:1;min-width:180px"><button type="submit" id="add-user-btn" class="primary">ユーザーを登録</button></form><p id="user-mgmt-status" class="muted" role="status"></p><div id="user-mgmt-list"><div class="search-loading"><span class="spinner" aria-hidden="true"></span><span>ユーザー一覧を読み込み中…</span></div></div></section><div class="cards"><section class="panel"><h2>役割ラベル</h2><div id="role-management"></div><div class="toolbar"><input id="new-role" aria-label="新しい役割"><button type="button" id="add-role">追加</button></div></section><section class="panel"><h2>状態の種類</h2><div id="status-management"></div><div class="toolbar"><input id="new-status" aria-label="新しい状態"><button type="button" id="add-status">追加</button></div></section><section class="panel"><h2>作品の形式</h2><div id="format-management"></div><div class="toolbar"><input id="new-format" aria-label="新しい作品の形式"><button type="button" id="add-format">追加</button></div></section></div><section class="panel"><h2>書影（表紙画像）の一括取込</h2><p class="muted">お手元の書影ZIPファイル（<code>YOPAC_書影_001.zip</code> など複数選択可）または展開済みのJPG画像を選択すると、Supabase Storage（<code>covers</code>バケット）へ一括保存され、全蔵書の書影が表示されます。</p><div class="toolbar"><label class="button primary">書影ZIP / 画像ファイルを選択して取込<input id="cover-batch-input" type="file" accept=".zip,image/*" multiple hidden></label></div><p id="image-import-status" class="muted" role="status"></p></section><section class="panel"><h2>保存した検索</h2>${
           db.saved
             .map(
               (s: any) =>
@@ -4431,6 +4516,191 @@ export default function YopacAppPage() {
             )
             .join('') || '<p>まだありません。</p>'
         }</section><section class="panel"><h2>データの保存・バックアップ</h2><p>変更はSupabaseデータベースにリアルタイム保存されます。</p><div class="toolbar"><button type="button" id="backup">全データをJSONで保存</button><button type="button" id="reload-data">最新データを読み直す</button></div></section>`
+        const loadAdminUsers = async () => {
+          const listEl = $('#user-mgmt-list')
+          const statusEl = $('#user-mgmt-status')
+          if (!listEl) return
+          listEl.innerHTML =
+            '<div class="search-loading"><span class="spinner" aria-hidden="true"></span><span>ユーザー一覧を読み込み中…</span></div>'
+          try {
+            const { users } = await adminUsersRequest('GET')
+            if (statusEl) {
+              statusEl.textContent = ''
+              statusEl.className = 'muted'
+            }
+            if (!users || !users.length) {
+              listEl.innerHTML = '<p class="muted">登録されているユーザーがありません。</p>'
+              return
+            }
+            listEl.innerHTML = `<div class="table-wrap"><table><thead><tr><th>メールアドレス</th><th>区分</th><th>作成日</th><th>最終ログイン</th><th>操作</th></tr></thead><tbody>${users
+              .map(
+                (u: any) =>
+                  `<tr><td><strong>${esc(u.email)}</strong></td><td><span class="badge">${
+                    u.isAdmin ? '管理者' : '利用者'
+                  }</span></td><td>${esc(fmt(u.created_at))}</td><td>${esc(
+                    fmt(u.last_sign_in_at)
+                  )}</td><td><div class="inline-links"><button type="button" class="tiny" data-edit-user="${esc(
+                    u.id
+                  )}" data-user-email="${esc(u.email)}" data-user-admin="${
+                    u.isAdmin ? '1' : '0'
+                  }">変更</button>${
+                    u.isAdmin
+                      ? ''
+                      : `<button type="button" class="tiny danger" data-del-user="${esc(
+                          u.id
+                        )}" data-user-email="${esc(u.email)}">削除</button>`
+                  }</div></td></tr>`
+              )
+              .join('')}</tbody></table></div>`
+
+            $$('[data-edit-user]', listEl).forEach((btn: any) => {
+              btn.onclick = () => {
+                const uid = btn.dataset.editUser
+                const curEmail = btn.dataset.userEmail
+                const isTargetAdmin = btn.dataset.userAdmin === '1'
+                openModal(
+                  `<h2>ユーザー情報の変更</h2>
+                  <form id="edit-user-form">
+                    <div class="form-grid">
+                      <label class="wide">メールアドレス
+                        <input type="email" id="edit-user-email" value="${esc(curEmail)}" ${
+                          isTargetAdmin ? 'disabled' : 'required'
+                        }>
+                      </label>
+                      <label class="wide">新しいパスワード（変更しない場合は空欄）
+                        <input type="password" id="edit-user-password" placeholder="6文字以上" minlength="6" autocomplete="new-password">
+                      </label>
+                    </div>
+                    ${
+                      isTargetAdmin
+                        ? '<p class="muted">管理者アカウントのメールアドレスは変更できません（パスワードのみ変更できます）。</p>'
+                        : ''
+                    }
+                    <p id="edit-user-error" class="danger" role="alert"></p>
+                    <div class="toolbar" style="margin-top:12px">
+                      <button type="submit" id="save-edit-user-btn" class="primary">変更を保存</button>
+                      <button type="button" id="cancel-edit-user-btn">キャンセル</button>
+                    </div>
+                  </form>`
+                )
+                $('#cancel-edit-user-btn', modalBody).onclick = closeModal
+                $('#edit-user-form', modalBody).onsubmit = async (ev: Event) => {
+                  ev.preventDefault()
+                  const errEl = $('#edit-user-error', modalBody)
+                  const saveBtn = $('#save-edit-user-btn', modalBody)
+                  const nextEmail = ($('#edit-user-email', modalBody)?.value || '').trim()
+                  const nextPassword = $('#edit-user-password', modalBody)?.value || ''
+                  const payload: any = { id: uid }
+                  if (!isTargetAdmin && nextEmail && nextEmail !== curEmail) payload.email = nextEmail
+                  if (nextPassword) payload.password = nextPassword
+                  if (!payload.email && !payload.password) {
+                    if (errEl) errEl.textContent = '変更する項目を入力してください。'
+                    return
+                  }
+                  if (saveBtn) {
+                    saveBtn.disabled = true
+                    saveBtn.textContent = '保存中…'
+                  }
+                  try {
+                    await adminUsersRequest('PATCH', payload)
+                    closeModal()
+                    notify('ユーザー情報を更新しました')
+                    loadAdminUsers()
+                  } catch (err: any) {
+                    if (errEl) errEl.textContent = err.message || '更新に失敗しました'
+                    if (saveBtn) {
+                      saveBtn.disabled = false
+                      saveBtn.textContent = '変更を保存'
+                    }
+                  }
+                }
+              }
+            })
+
+            $$('[data-del-user]', listEl).forEach((btn: any) => {
+              btn.onclick = () => {
+                const uid = btn.dataset.delUser
+                const email = btn.dataset.userEmail
+                openModal(
+                  `<h2>ユーザーを削除</h2>
+                  <p><strong>${esc(email)}</strong> のログインアカウントを削除します。この操作は取り消せません。</p>
+                  <p id="del-user-error" class="danger" role="alert"></p>
+                  <div class="toolbar">
+                    <button type="button" id="cancel-del-user-btn">キャンセル</button>
+                    <button type="button" id="confirm-del-user-btn" class="danger">このユーザーを削除</button>
+                  </div>`
+                )
+                $('#cancel-del-user-btn', modalBody).onclick = closeModal
+                $('#confirm-del-user-btn', modalBody).onclick = async () => {
+                  const delBtn = $('#confirm-del-user-btn', modalBody)
+                  const errEl = $('#del-user-error', modalBody)
+                  if (delBtn) {
+                    delBtn.disabled = true
+                    delBtn.textContent = '削除中…'
+                  }
+                  try {
+                    await adminUsersRequest('DELETE', { id: uid })
+                    closeModal()
+                    notify(`「${email}」を削除しました`)
+                    loadAdminUsers()
+                  } catch (err: any) {
+                    if (errEl) errEl.textContent = err.message || '削除に失敗しました'
+                    if (delBtn) {
+                      delBtn.disabled = false
+                      delBtn.textContent = 'このユーザーを削除'
+                    }
+                  }
+                }
+              }
+            })
+          } catch (err: any) {
+            listEl.innerHTML = ''
+            if (statusEl) {
+              statusEl.textContent = err.message || 'ユーザー一覧の読み込みに失敗しました'
+              statusEl.className = 'danger'
+            }
+          }
+        }
+
+        const addUserForm = $('#add-user-form')
+        if (addUserForm) {
+          addUserForm.onsubmit = async (ev: Event) => {
+            ev.preventDefault()
+            const emailInput = $('#new-user-email')
+            const passInput = $('#new-user-password')
+            const btn = $('#add-user-btn')
+            const statusEl = $('#user-mgmt-status')
+            const email = (emailInput?.value || '').trim()
+            const password = passInput?.value || ''
+            if (btn) {
+              btn.disabled = true
+              btn.textContent = '登録中…'
+            }
+            if (statusEl) {
+              statusEl.textContent = ''
+              statusEl.className = 'muted'
+            }
+            try {
+              await adminUsersRequest('POST', { email, password })
+              if (emailInput) emailInput.value = ''
+              if (passInput) passInput.value = ''
+              notify(`ユーザー「${email}」を登録しました`)
+              await loadAdminUsers()
+            } catch (err: any) {
+              if (statusEl) {
+                statusEl.textContent = err.message || 'ユーザー登録に失敗しました'
+                statusEl.className = 'danger'
+              }
+            } finally {
+              if (btn) {
+                btn.disabled = false
+                btn.textContent = 'ユーザーを登録'
+              }
+            }
+          }
+        }
+        loadAdminUsers()
+
         renderWorkFormats()
         renderManage('roles', 'role-management')
         renderManage('statuses', 'status-management')

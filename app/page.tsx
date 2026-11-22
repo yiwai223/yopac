@@ -616,6 +616,9 @@ export default function YopacAppPage() {
       const isAdminUser = currentEmail === ADMIN_EMAIL.trim().toLowerCase()
       const isViewer = !isAdminUser || urlParams.get('view') === 'viewer'
       const role = isViewer ? 'viewer' : 'admin'
+      const VIEWER_VISIBLE_STATUSES = ['所蔵', '貸出中']
+      const isBookVisibleToCurrentUser = (b: any) =>
+        role === 'admin' || VIEWER_VISIBLE_STATUSES.includes(String(b?.status || '').trim())
 
       const entities = ['books', 'people', 'works', 'publishers']
       const optionKeys = ['roles', 'statuses', 'saved', 'shoulderOptions', 'workFormats']
@@ -1352,7 +1355,9 @@ export default function YopacAppPage() {
             const mappedAll = rawAll
               .filter((r: any) => !r.deleted_at)
               .map((r: any) => mapBookRow(r, true))
-            let matchedAdv = mappedAll.filter((b: any) => evaluate(b, filters.tree))
+            let matchedAdv = mappedAll.filter(
+              (b: any) => isBookVisibleToCurrentUser(b) && evaluate(b, filters.tree)
+            )
             if (filters.sort === 'volume') {
               matchedAdv = sortByVolumeNatural(matchedAdv, filters.asc)
             }
@@ -1385,6 +1390,7 @@ export default function YopacAppPage() {
           const cols = needsFull ? '*' : ITEM_LIST_COLUMNS
 
           let query = supabase.from('items').select(cols, { count: 'exact' })
+          if (role === 'viewer') query = query.in('status', VIEWER_VISIBLE_STATUSES)
 
           if (filters.publisher) query = query.eq('publisher_id', filters.publisher)
           if (filters.status) query = query.eq('status', filters.status)
@@ -1694,7 +1700,7 @@ export default function YopacAppPage() {
         )}"><button type="submit" class="primary" id="run-search" ${
           isListSearching ? 'disabled' : ''
         }>${isListSearching ? '検索中...' : '検索'}</button><button type="button" id="scan">ISBN読取</button><button type="button" id="clear">条件解除</button></form><div class="toolbar"><select id="status-filter" aria-label="状態"><option value="">すべての状態</option>${opts(
-          db.statuses,
+          role === 'viewer' ? VIEWER_VISIBLE_STATUSES : db.statuses,
           filters.status
         )}</select><button type="button" id="class-filter">分類から選ぶ${
           filters.cls ? '：' + esc(filters.cls) : ''
@@ -2177,6 +2183,10 @@ export default function YopacAppPage() {
       }
 
       function bookDetail(b: any) {
+        if (!isBookVisibleToCurrentUser(b)) {
+          notFound()
+          return
+        }
         const isAdmin = role === 'admin'
         const adminActions = isAdmin
           ? `<div class="detail-actions"><button type="button" id="star" class="favorite" aria-label="お気に入り">${
@@ -2252,7 +2262,7 @@ export default function YopacAppPage() {
           `<ul class="relations">${
             (b.related || [])
               .map((i: string) => db.books.find((x: any) => x.id === i))
-              .filter(Boolean)
+              .filter((x: any) => x && isBookVisibleToCurrentUser(x))
               .map((x: any) => `<li><a href="#book/${x.id}">${esc(x.title)}</a></li>`)
               .join('') || '<li class="muted">関連書籍なし</li>'
           }</ul>`
@@ -3832,18 +3842,23 @@ export default function YopacAppPage() {
           const orCond = safeName
             ? `publisher_id.eq.${p.id},publisher.eq.${safeName}`
             : `publisher_id.eq.${p.id}`
-          const { data } = await supabase
+          let pubBooksQuery = supabase
             .from('items')
             .select(ITEM_LIST_COLUMNS)
             .or(orCond)
+          if (role === 'viewer') pubBooksQuery = pubBooksQuery.in('status', VIEWER_VISIBLE_STATUSES)
+          const { data } = await pubBooksQuery
             .order('created_at', { ascending: false })
             .limit(500)
           relBooks = ((data as any[]) || [])
             .filter((r: any) => !r.deleted_at)
             .map((r: any) => mapBookRow(r, false))
+            .filter((b: any) => isBookVisibleToCurrentUser(b))
         } catch (err) {
           console.error('Fetch publisher books error:', err)
-          relBooks = db.books.filter((b: any) => b.publisher === p.id)
+          relBooks = db.books.filter(
+            (b: any) => b.publisher === p.id && isBookVisibleToCurrentUser(b)
+          )
         }
         app.innerHTML = `<div class="breadcrumb"><a href="#publishers">出版者・レーベル</a> › 詳細</div><div class="page-head"><h1>${esc(
           p.name
@@ -3920,25 +3935,33 @@ export default function YopacAppPage() {
         const orParts = [`people_json.ilike.%${p.id}%`]
         if (safeName) orParts.push(`author.ilike.%${safeName}%`)
 
+        let personBooksQuery = supabase
+          .from('items')
+          .select(ITEM_LIST_COLUMNS)
+          .or(orParts.join(','))
+        if (role === 'viewer')
+          personBooksQuery = personBooksQuery.in('status', VIEWER_VISIBLE_STATUSES)
         const [booksRes] = await Promise.all([
-          supabase
-            .from('items')
-            .select(ITEM_LIST_COLUMNS)
-            .or(orParts.join(','))
-            .order('created_at', { ascending: false })
-            .limit(500),
+          personBooksQuery.order('created_at', { ascending: false }).limit(500),
           ensureWorksLoaded(),
         ])
 
         const fetchedBooks = ((booksRes.data as any[]) || [])
           .filter((r: any) => !r.deleted_at)
           .map((r: any) => mapBookRow(r, false))
-          .filter((b: any) => (b.people || []).some((x: any) => x.id === p.id))
+          .filter(
+            (b: any) =>
+              isBookVisibleToCurrentUser(b) && (b.people || []).some((x: any) => x.id === p.id)
+          )
 
         const relBooksMap = new Map<string, any>()
         for (const b of fetchedBooks) relBooksMap.set(b.id, b)
         for (const b of db.books) {
-          if ((b.people || []).some((x: any) => x.id === p.id) && !relBooksMap.has(b.id)) {
+          if (
+            isBookVisibleToCurrentUser(b) &&
+            (b.people || []).some((x: any) => x.id === p.id) &&
+            !relBooksMap.has(b.id)
+          ) {
             relBooksMap.set(b.id, b)
           }
         }
@@ -4093,22 +4116,27 @@ export default function YopacAppPage() {
 
       async function workDetail(w: any) {
         app.innerHTML = '<div class="panel"><p>収録先書籍を読み込み中…</p></div>'
+        let workBooksQuery = supabase
+          .from('items')
+          .select(ITEM_LIST_COLUMNS + ',works_json')
+          .ilike('works_json', `%${w.id}%`)
+        if (role === 'viewer')
+          workBooksQuery = workBooksQuery.in('status', VIEWER_VISIBLE_STATUSES)
         const [booksRes] = await Promise.all([
-          supabase
-            .from('items')
-            .select(ITEM_LIST_COLUMNS + ',works_json')
-            .ilike('works_json', `%${w.id}%`)
-            .order('created_at', { ascending: false })
-            .limit(500),
+          workBooksQuery.order('created_at', { ascending: false }).limit(500),
           ensureWorksLoaded(),
         ])
         const relBooksMap = new Map<string, any>()
         for (const r of ((booksRes.data as any[]) || []).filter((x: any) => !x.deleted_at)) {
           const b = mapBookRow(r, false)
-          relBooksMap.set(b.id, b)
+          if (isBookVisibleToCurrentUser(b)) relBooksMap.set(b.id, b)
         }
         for (const b of db.books) {
-          if ((b.works || []).includes(w.id) && !relBooksMap.has(b.id)) {
+          if (
+            isBookVisibleToCurrentUser(b) &&
+            (b.works || []).includes(w.id) &&
+            !relBooksMap.has(b.id)
+          ) {
             relBooksMap.set(b.id, b)
           }
         }

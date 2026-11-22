@@ -396,6 +396,7 @@ export default function YopacAppPage() {
           _detailLoaded: isFullDetail,
           title: String(r.title ?? rawObj?.title ?? '').trim(),
           subtitle: String(r.subtitle ?? rawObj?.subtitle ?? '').trim(),
+          edition: String(r.edition ?? rawObj?.edition ?? '').trim(),
           series: String(r.series ?? rawObj?.series ?? '').trim(),
           volume: String(r.volume ?? rawObj?.volume ?? '').trim(),
           publisher: pubId,
@@ -1075,9 +1076,7 @@ export default function YopacAppPage() {
         const head = list.slice(0, 3).map((p: any) => {
           const name = esc(person(p.id)?.name || p.printed || '未設定')
           const roleText = esc((p.roles || []).join('・') || '役割未設定')
-          return role === 'admin'
-            ? `<a href="#person/${p.id}">${name}</a><span class="role">${roleText}</span>`
-            : `<span>${name}</span><span class="role">${roleText}</span>`
+          return `<a href="#person/${p.id}">${name}</a><span class="role">${roleText}</span>`
         })
         if (list.length > 3) head.push('<span class="muted">ほか</span>')
         return head.join('<br>')
@@ -1092,23 +1091,42 @@ export default function YopacAppPage() {
         return names.length > 3 ? `${text} ほか` : text
       }
 
-      const fieldDefs: Record<string, string> = {
-        title: '書名',
-        subtitle: '副題',
-        person: '人物・団体（別表記含む）',
-        role: '人物の役割',
-        work: '収録作品',
-        publisher: '出版社・レーベル',
-        series: 'シリーズ名',
-        classification: '分類番号',
-        status: '状態',
-        isbn: 'ISBN',
-        registered: '登録日',
-        modified: '変更日',
-        price: '価格',
-        purchasePrice: '購入価格',
-        memo: 'メモ',
-      }
+      const fieldDefs: Record<string, string> =
+        role === 'admin'
+          ? {
+              title: '書名',
+              subtitle: '副題',
+              edition: '版',
+              person: '人物・団体（別表記含む）',
+              role: '人物の役割',
+              work: '収録作品',
+              publisher: '出版社・レーベル',
+              series: 'シリーズ名',
+              classification: '分類番号',
+              status: '状態',
+              isbn: 'ISBN',
+              registered: '登録日',
+              modified: '変更日',
+              price: '価格',
+              purchasePrice: '購入価格',
+              memo: 'メモ',
+            }
+          : {
+              title: '書名',
+              subtitle: '副題',
+              edition: '版',
+              person: '人物・団体（別表記含む）',
+              role: '人物の役割',
+              work: '収録作品',
+              publisher: '出版社・レーベル',
+              series: 'シリーズ名',
+              classification: '分類番号',
+              status: '状態',
+              isbn: 'ISBN',
+              registered: '登録日',
+              modified: '変更日',
+              price: '価格',
+            }
 
       function valueFor(b: any, f: string) {
         switch (f) {
@@ -1609,16 +1627,9 @@ export default function YopacAppPage() {
                 (b: any) =>
                   `<tr><td><div class="thumb-cell">${
                     b.cover || b.isbn
-                      ? `<a href="${role === 'admin' ? `#book/${b.id}` : '#books'}">${renderCoverImg(
-                          b,
-                          'list-thumb'
-                        )}</a>`
+                      ? `<a href="#book/${b.id}">${renderCoverImg(b, 'list-thumb')}</a>`
                       : ''
-                  }<div>${
-                    role === 'admin'
-                      ? `<a class="title" href="#book/${b.id}">${esc(b.title) || '（書名未入力）'}</a>`
-                      : `<span class="title">${esc(b.title) || '（書名未入力）'}</span>`
-                  }${
+                  }<div><a class="title" href="#book/${b.id}">${esc(b.title) || '（書名未入力）'}</a>${
                     b.subtitle && !b.series ? `<div class="muted">${esc(b.subtitle)}</div>` : ''
                   }${
                     b.series
@@ -1643,9 +1654,7 @@ export default function YopacAppPage() {
               .join('')}</tbody></table></div><div class="mobile-list">${visible
               .map(
                 (b: any) =>
-                  `<a class="book-card" href="${
-                    role === 'admin' ? `#book/${b.id}` : '#books'
-                  }">${renderCoverImg(b, '')}<div class="copy"><div class="title">${esc(
+                  `<a class="book-card" href="#book/${b.id}">${renderCoverImg(b, '')}<div class="copy"><div class="title">${esc(
                     b.title
                   )}</div>${b.subtitle ? `<div>${esc(b.subtitle)}</div>` : ''}${
                     b.series || b.volume
@@ -1706,16 +1715,28 @@ export default function YopacAppPage() {
               )}</select>`
             : ''
         }</div></section><div class="toolbar no-print"><select id="sort" aria-label="並び順">${opts(
-          Object.entries({
-            registered: '登録日順',
-            modified: '変更日順',
-            classification: '分類番号順',
-            publisher: '出版社名順',
-            title: '書名順',
-            volume: '巻号順',
-            price: '価格順',
-            purchasePrice: '購入価格順',
-          }).map(([id, name]) => ({ id, name })),
+          Object.entries(
+            role === 'admin'
+              ? {
+                  registered: '登録日順',
+                  modified: '変更日順',
+                  classification: '分類番号順',
+                  publisher: '出版社名順',
+                  title: '書名順',
+                  volume: '巻号順',
+                  price: '価格順',
+                  purchasePrice: '購入価格順',
+                }
+              : {
+                  registered: '登録日順',
+                  modified: '変更日順',
+                  classification: '分類番号順',
+                  publisher: '出版社名順',
+                  title: '書名順',
+                  volume: '巻号順',
+                  price: '価格順',
+                }
+          ).map(([id, name]) => ({ id, name })),
           filters.sort
         )}</select><button type="button" id="direction">${
           filters.asc ? '↑ 昇順' : '↓ 降順'
@@ -2001,28 +2022,31 @@ export default function YopacAppPage() {
           if (/^[=+@\-\t\r]/.test(s)) s = "'" + s
           return '"' + s.replaceAll('"', '""') + '"'
         }
+        const headerRow = [
+          '登録日',
+          '変更日',
+          '分類番号',
+          '主題分野',
+          '書名',
+          '版',
+          'シリーズ名',
+          '巻号',
+          '著者等',
+          '出版社',
+          '状態',
+          'ISBN',
+          '価格',
+          ...(role === 'admin' ? ['購入価格'] : []),
+        ]
         const rows = [
-          [
-            '登録日',
-            '変更日',
-            '分類番号',
-            '主題分野',
-            '書名',
-            'シリーズ名',
-            '巻号',
-            '著者等',
-            '出版社',
-            '状態',
-            'ISBN',
-            '価格',
-            '購入価格',
-          ],
+          headerRow,
           ...lastResults.map((b: any) => [
             fmt(b.registered),
             fmt(b.modified),
             b.classification,
             className(b.classification),
             b.title,
+            b.edition || '',
             b.series,
             b.volume,
             (b.people || [])
@@ -2037,7 +2061,7 @@ export default function YopacAppPage() {
             b.status,
             b.isbn,
             b.price,
-            b.purchasePrice,
+            ...(role === 'admin' ? [b.purchasePrice] : []),
           ]),
         ]
         download(
@@ -2110,6 +2134,7 @@ export default function YopacAppPage() {
       }
 
       function confirmBookDeletion(bookId: string) {
+        if (role !== 'admin') return
         const book = db.books.find((b: any) => b.id === bookId)
         if (!book) return
         openModal(
@@ -2136,6 +2161,7 @@ export default function YopacAppPage() {
       }
 
       function duplicateBook(source: any) {
+        if (role !== 'admin') return
         const copy = structuredClone(source)
         delete copy._dbId
         copy._detailLoaded = true
@@ -2151,18 +2177,34 @@ export default function YopacAppPage() {
       }
 
       function bookDetail(b: any) {
+        const isAdmin = role === 'admin'
+        const adminActions = isAdmin
+          ? `<div class="detail-actions"><button type="button" id="star" class="favorite" aria-label="お気に入り">${
+              b.favorite ? '★' : '☆'
+            }</button> <a class="button primary" href="#edit-book/${
+              b.id
+            }">編集</a> <button type="button" id="duplicate-book">複製</button> <button type="button" class="danger" data-delete-book="${esc(
+              b.id
+            )}">削除</button></div>`
+          : ''
+        const privateFields = isAdmin
+          ? `${detailField('購入価格', money(b.purchasePrice))}${detailField(
+              '読後評価',
+              esc(b.rating)
+            )}${detailField('読後メモ', esc(b.review))}${detailField(
+              'メモ',
+              esc(b.memo).replaceAll('\n', '<br>')
+            )}`
+          : ''
         app.innerHTML = `<div class="breadcrumb"><a href="#books">所蔵リスト</a> › 書籍詳細</div><div class="page-head"><h1>${
           esc(b.title) || '（書名未入力）'
-        }</h1><div class="detail-actions"><button type="button" id="star" class="favorite" aria-label="お気に入り">${
-          b.favorite ? '★' : '☆'
-        }</button> <a class="button primary" href="#edit-book/${
-          b.id
-        }">編集</a> <button type="button" id="duplicate-book">複製</button> <button type="button" class="danger" data-delete-book="${esc(
-          b.id
-        )}">削除</button></div></div><div class="detail-grid"><section class="fields">${detailField(
+        }</h1>${adminActions}</div><div class="detail-grid"><section class="fields">${detailField(
           '書影',
           renderCoverImg(b, 'cover')
         )}${detailField('書名', esc(b.title))}${detailField('副題', esc(b.subtitle))}${detailField(
+          '版',
+          esc(b.edition)
+        )}${detailField(
           'シリーズ名',
           b.series
             ? `<button type="button" class="link-button" data-series="${esc(b.series)}">${esc(
@@ -2194,21 +2236,17 @@ export default function YopacAppPage() {
           )
           .join(' › ')}</div><p>${esc(b.classification)} ${esc(
           className(b.classification)
-        )}</p></div><div class="fields">${detailField('価格', money(b.price))}${detailField(
-          '購入価格',
-          money(b.purchasePrice)
-        )}${detailField('読後評価', esc(b.rating))}${detailField(
-          '読後メモ',
-          esc(b.review)
-        )}${detailField('ISBN', esc(b.isbn))}${detailField(
-          'メモ',
-          esc(b.memo).replaceAll('\n', '<br>')
-        )}${detailField('登録日', fmt(b.registered))}${detailField(
+        )}</p></div><div class="fields">${detailField('ISBN', esc(b.isbn))}${detailField(
+          '価格',
+          money(b.price)
+        )}${privateFields}${detailField('登録日', fmt(b.registered))}${detailField(
           '変更日',
           fmt(b.modified)
         )}${detailField(
           '状態',
-          `<select id="quick-status" aria-label="状態">${opts(db.statuses, b.status)}</select>`
+          isAdmin
+            ? `<select id="quick-status" aria-label="状態">${opts(db.statuses, b.status)}</select>`
+            : `<span class="badge">${esc(b.status)}</span>`
         )}${detailField(
           '関連書籍',
           `<ul class="relations">${
@@ -2219,26 +2257,29 @@ export default function YopacAppPage() {
               .join('') || '<li class="muted">関連書籍なし</li>'
           }</ul>`
         )}</div></section></div>`
-        $('#star').onclick = () => {
-          b.favorite = !b.favorite
-          persist()
-          bookDetail(b)
-        }
-        $('#duplicate-book').onclick = () => duplicateBook(b)
-        $('#quick-status').onchange = (e: any) => {
-          b.status = e.target.value
-          b.modified = new Date().toISOString()
-          persist()
-          notify('状態を変更しました')
-          bookDetail(b)
+        if (isAdmin) {
+          $('#star').onclick = () => {
+            b.favorite = !b.favorite
+            persist()
+            bookDetail(b)
+          }
+          $('#duplicate-book').onclick = () => duplicateBook(b)
+          $('#quick-status').onchange = (e: any) => {
+            b.status = e.target.value
+            b.modified = new Date().toISOString()
+            persist()
+            notify('状態を変更しました')
+            bookDetail(b)
+          }
+          bindBookDeletion()
         }
         bindFilterLinks()
-        bindBookDeletion()
       }
 
       const bookFields: Record<string, string> = {
         title: '書名',
         subtitle: '副題',
+        edition: '版',
         series: 'シリーズ名',
         volume: '巻号・エピソードタイトル',
         classification: '分類番号',
@@ -3398,12 +3439,14 @@ export default function YopacAppPage() {
 
       let bookDraft: any = null
       function editBook(source: any) {
+        if (role !== 'admin') return
         bookDraft = structuredClone(
           source || {
             id: id(),
             _detailLoaded: true,
             title: '',
             subtitle: '',
+            edition: '',
             series: '',
             volume: '',
             classification: '',
@@ -3471,7 +3514,9 @@ export default function YopacAppPage() {
                       ['price', 'purchasePrice', 'rating'].includes(k)
                         ? 'type="number" min="0" ' + (k === 'rating' ? 'max="5" ' : '') + 'step="1"'
                         : 'type="text"'
-                    } ${k === 'title' ? 'required' : ''} value="${esc(b[k])}">`
+                    } ${k === 'title' ? 'required' : ''} ${
+                      k === 'edition' ? 'placeholder="例：第2版、改訂版、ワイド版"' : ''
+                    } value="${esc(b[k])}">`
               }</label>`
           )
           .join(
@@ -3634,7 +3679,11 @@ export default function YopacAppPage() {
       }
 
       function publishersList() {
-        app.innerHTML = `<div class="page-head"><div><h1>出版者・レーベル</h1><div class="count">${db.publishers.length}件</div></div><button type="button" id="new-publisher-page" class="primary">＋ 出版者・レーベルを追加</button></div><div class="toolbar"><input id="publishers-search" type="search" aria-label="出版者・レーベル検索" placeholder="名称・よみで検索" autocomplete="off"></div><div id="publishers-results"></div>`
+        app.innerHTML = `<div class="page-head"><div><h1>出版者・レーベル</h1><div class="count">${db.publishers.length}件</div></div>${
+          role === 'admin'
+            ? '<button type="button" id="new-publisher-page" class="primary">＋ 出版者・レーベルを追加</button>'
+            : ''
+        }</div><div class="toolbar"><input id="publishers-search" type="search" aria-label="出版者・レーベル検索" placeholder="名称・よみで検索" autocomplete="off"></div><div id="publishers-results"></div>`
         const input = $('#publishers-search')
         function draw() {
           const query = relatedSearchText(input.value)
@@ -3664,10 +3713,12 @@ export default function YopacAppPage() {
         }
         input.oninput = draw
         input.oncompositionend = draw
-        $('#new-publisher-page').onclick = () =>
-          createRelated('publisher', (p: any) => {
-            location.hash = '#publisher/' + p.id
-          })
+        if ($('#new-publisher-page')) {
+          $('#new-publisher-page').onclick = () =>
+            createRelated('publisher', (p: any) => {
+              location.hash = '#publisher/' + p.id
+            })
+        }
         draw()
       }
 
@@ -3796,7 +3847,11 @@ export default function YopacAppPage() {
         }
         app.innerHTML = `<div class="breadcrumb"><a href="#publishers">出版者・レーベル</a> › 詳細</div><div class="page-head"><h1>${esc(
           p.name
-        )}</h1><div class="detail-actions"><button type="button" id="edit-publisher" class="primary">編集</button> <button type="button" id="delete-publisher" class="danger">削除</button></div></div><div class="detail-grid"><div class="fields">${detailField(
+        )}</h1>${
+          role === 'admin'
+            ? '<div class="detail-actions"><button type="button" id="edit-publisher" class="primary">編集</button> <button type="button" id="delete-publisher" class="danger">削除</button></div>'
+            : ''
+        }</div><div class="detail-grid"><div class="fields">${detailField(
           '名称',
           esc(p.name)
         )}${detailField(
@@ -3817,12 +3872,17 @@ export default function YopacAppPage() {
             .join('') || '<li class="muted">該当書籍なし</li>'
         }</ul></section></div>`
         bindFilterLinks()
-        $('#edit-publisher').onclick = () => editPublisher(p)
-        $('#delete-publisher').onclick = () => confirmRecordDeletion('publishers', p.id)
+        if ($('#edit-publisher')) $('#edit-publisher').onclick = () => editPublisher(p)
+        if ($('#delete-publisher'))
+          $('#delete-publisher').onclick = () => confirmRecordDeletion('publishers', p.id)
       }
 
       function peopleList() {
-        app.innerHTML = `<div class="page-head"><div><h1>個人・団体</h1><div class="count">${db.people.length}件</div></div><button type="button" id="new-person" class="primary">＋ 個人・団体を追加</button></div><div class="toolbar"><input id="people-search" type="search" placeholder="名前・よみ・原綴り・別名で検索" aria-label="人物検索"></div><div id="people-results"></div>`
+        app.innerHTML = `<div class="page-head"><div><h1>個人・団体</h1><div class="count">${db.people.length}件</div></div>${
+          role === 'admin'
+            ? '<button type="button" id="new-person" class="primary">＋ 個人・団体を追加</button>'
+            : ''
+        }</div><div class="toolbar"><input id="people-search" type="search" placeholder="名前・よみ・原綴り・別名で検索" aria-label="人物検索"></div><div id="people-results"></div>`
         function draw() {
           const q = normal($('#people-search').value)
           const a = db.people
@@ -3842,7 +3902,7 @@ export default function YopacAppPage() {
             .join('')}</tbody></table></div>`
         }
         $('#people-search').oninput = draw
-        $('#new-person').onclick = () => editPerson(null)
+        if ($('#new-person')) $('#new-person').onclick = () => editPerson(null)
         draw()
       }
 
@@ -3889,7 +3949,11 @@ export default function YopacAppPage() {
         )
         app.innerHTML = `<div class="breadcrumb"><a href="#people">個人・団体</a> › 詳細</div><div class="page-head"><h1>${esc(
           p.name
-        )}</h1><div class="detail-actions"><button type="button" id="edit-person" class="primary">編集</button> <button type="button" id="delete-person" class="danger">削除</button></div></div><div class="detail-grid"><div class="fields">${detailField(
+        )}</h1>${
+          role === 'admin'
+            ? '<div class="detail-actions"><button type="button" id="edit-person" class="primary">編集</button> <button type="button" id="delete-person" class="danger">削除</button></div>'
+            : ''
+        }</div><div class="detail-grid"><div class="fields">${detailField(
           '名前',
           esc(p.name)
         )}${detailField('肩書など', esc(p.description).replaceAll('\n', '<br>'))}${detailField(
@@ -3923,11 +3987,13 @@ export default function YopacAppPage() {
         }件</span></h2><ul class="relations">${workLinks(
           relWorks.map((w: any) => w.id)
         )}</ul></section></div></div>`
-        $('#edit-person').onclick = () => editPerson(p)
-        $('#delete-person').onclick = () => confirmRecordDeletion('people', p.id)
+        if ($('#edit-person')) $('#edit-person').onclick = () => editPerson(p)
+        if ($('#delete-person'))
+          $('#delete-person').onclick = () => confirmRecordDeletion('people', p.id)
       }
 
       function editPerson(source: any) {
+        if (role !== 'admin') return
         const p = structuredClone(
           source || {
             id: id(),
@@ -4000,7 +4066,11 @@ export default function YopacAppPage() {
       async function worksList() {
         app.innerHTML = '<div class="panel"><p>作品データを読み込み中…</p></div>'
         await ensureWorksLoaded()
-        app.innerHTML = `<div class="page-head"><div><h1>作品</h1><div class="count">${db.works.length}件</div></div><button type="button" class="primary" id="new-work">＋ 作品を追加</button></div><div class="toolbar"><input type="search" id="works-search" placeholder="作品名・著作者・形式で検索" aria-label="作品検索"></div><div id="works-results"></div>`
+        app.innerHTML = `<div class="page-head"><div><h1>作品</h1><div class="count">${db.works.length}件</div></div>${
+          role === 'admin'
+            ? '<button type="button" class="primary" id="new-work">＋ 作品を追加</button>'
+            : ''
+        }</div><div class="toolbar"><input type="search" id="works-search" placeholder="作品名・著作者・形式で検索" aria-label="作品検索"></div><div id="works-results"></div>`
         function draw() {
           const q = normal($('#works-search').value)
           const a = db.works.filter((w: any) =>
@@ -4017,7 +4087,7 @@ export default function YopacAppPage() {
             .join('')}</tbody></table></div>`
         }
         $('#works-search').oninput = draw
-        $('#new-work').onclick = () => editWork(null)
+        if ($('#new-work')) $('#new-work').onclick = () => editWork(null)
         draw()
       }
 
@@ -4053,7 +4123,11 @@ export default function YopacAppPage() {
         ]
         app.innerHTML = `<div class="breadcrumb"><a href="#works">作品</a> › 詳細</div><div class="page-head"><h1>${esc(
           w.title
-        )}</h1><div class="detail-actions"><button type="button" id="edit-work" class="primary">編集</button> <button type="button" id="delete-work" class="danger">削除</button></div></div><div class="detail-grid"><section class="fields">${detailField(
+        )}</h1>${
+          role === 'admin'
+            ? '<div class="detail-actions"><button type="button" id="edit-work" class="primary">編集</button> <button type="button" id="delete-work" class="danger">削除</button></div>'
+            : ''
+        }</div><div class="detail-grid"><section class="fields">${detailField(
           '作品名',
           esc(w.title)
         )}${detailField(
@@ -4074,11 +4148,13 @@ export default function YopacAppPage() {
         )}</ul><h2>翻訳</h2><ul class="relations">${workLinks(
           translations
         )}</ul></div></section></div>`
-        $('#edit-work').onclick = () => editWork(w)
-        $('#delete-work').onclick = () => confirmRecordDeletion('works', w.id)
+        if ($('#edit-work')) $('#edit-work').onclick = () => editWork(w)
+        if ($('#delete-work'))
+          $('#delete-work').onclick = () => confirmRecordDeletion('works', w.id)
       }
 
       async function editWork(source: any) {
+        if (role !== 'admin') return
         await ensureWorksLoaded()
         const w = structuredClone(
           source || {
@@ -4822,12 +4898,15 @@ export default function YopacAppPage() {
       async function route() {
         closeModal()
         window.scrollTo(0, 0)
-        if (role === 'viewer') {
-          if (location.hash !== '#books') history.replaceState(null, '', '#books')
+        const [kind, key] = location.hash.slice(1).split('/')
+        if (
+          role === 'viewer' &&
+          (kind === 'settings' || kind === 'edit-book' || (kind === 'book' && key === 'new'))
+        ) {
+          history.replaceState(null, '', '#books')
           listBooks()
           return
         }
-        const [kind, key] = location.hash.slice(1).split('/')
         switch (kind) {
           case 'publishers':
             publishersList()
@@ -4887,7 +4966,7 @@ export default function YopacAppPage() {
           const backToAdminLink = isAdminUser
             ? `<a href="${window.location.pathname}">管理者画面に戻る</a>`
             : ''
-          nav.innerHTML = `<a href="#books">所蔵リスト</a>${backToAdminLink}<button type="button" class="nav-btn" id="logout-btn">ログアウト</button>`
+          nav.innerHTML = `<a href="#books">所蔵リスト</a><a href="#people">個人・団体</a><a href="#works">作品</a><a href="#publishers">出版者・レーベル</a>${backToAdminLink}<button type="button" class="nav-btn" id="logout-btn">ログアウト</button>`
         } else {
           nav.innerHTML = `<a href="#books">所蔵リスト</a><a href="#people">個人・団体</a><a href="#works">作品</a><a href="#publishers">出版者・レーベル</a><a href="#settings">管理</a><a href="${window.location.pathname}?view=viewer">利用者画面を確認</a><button type="button" class="nav-btn" id="logout-btn">ログアウト</button>`
         }

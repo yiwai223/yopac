@@ -2457,9 +2457,7 @@ export default function YopacAppPage() {
           const parts: string[] = []
           if (per.reading) parts.push(per.reading)
           if (per.description) {
-            const firstLine = String(per.description).split(/
-?
-/)[0].trim()
+            const firstLine = String(per.description).split(/\r?\n/)[0].trim()
             if (firstLine) parts.push(firstLine)
           }
           const sampleWorks = db.works
@@ -2519,9 +2517,7 @@ export default function YopacAppPage() {
         $('#bulk-preview-btn', modalBody).onclick = () => {
           const rawText = $('#bulk-works-text', modalBody).value || ''
           const lines = rawText
-            .split(/
-?
-/)
+            .split(/\r?\n/)
             .map((l: string) => l.trim())
             .filter(Boolean)
           if (!lines.length) return notify('作品名を1行以上入力してください')

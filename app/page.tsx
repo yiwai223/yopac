@@ -1097,7 +1097,7 @@ export default function YopacAppPage() {
         const list = m || []
         if (!list.length) return ''
         const head = list.slice(0, 3).map((p: any) => {
-          const name = esc(person(p.id)?.name || p.printed || '未設定')
+          const name = esc(String(p.printed || '').trim() || person(p.id)?.name || '未設定')
           const roleText = esc((p.roles || []).join('・') || '役割未設定')
           return `<a href="#person/${p.id}">${name}</a><span class="role">${roleText}</span>`
         })
@@ -1107,7 +1107,7 @@ export default function YopacAppPage() {
 
       function renderCardPeopleMobile(m: any[]) {
         const names = (m || [])
-          .map((p: any) => person(p.id)?.name || p.printed)
+          .map((p: any) => String(p.printed || '').trim() || person(p.id)?.name)
           .filter(Boolean)
         if (!names.length) return ''
         const text = names.slice(0, 3).join(' / ')
@@ -2091,7 +2091,7 @@ export default function YopacAppPage() {
                 (p: any) =>
                   ((p.roles || []).join('・') || '役割未設定') +
                   ': ' +
-                  (person(p.id)?.name || p.printed || '')
+                  (String(p.printed || '').trim() || person(p.id)?.name || '')
               )
               .join(' / '),
             publisher(b.publisher),
@@ -2117,7 +2117,7 @@ export default function YopacAppPage() {
           .map(
             (b: any) =>
               `<tr><td>${esc(b.title)}</td><td>${esc(
-                (b.people || []).map((p: any) => person(p.id)?.name || p.printed).join(' / ')
+                (b.people || []).map((p: any) => String(p.printed || '').trim() || person(p.id)?.name).join(' / ')
               )}</td><td>${esc(publisher(b.publisher))}</td><td>${esc(b.classification)} ${esc(
                 className(b.classification)
               )}</td><td>${esc(b.status)}</td></tr>`

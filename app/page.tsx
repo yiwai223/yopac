@@ -620,6 +620,22 @@ export default function YopacAppPage() {
       const isAdminUser = currentEmail === ADMIN_EMAIL.trim().toLowerCase()
       const isViewer = !isAdminUser || urlParams.get('view') === 'viewer'
       const role = isViewer ? 'viewer' : 'admin'
+      const loginLogKey = `yopac_login_logged_${user.id}_${role}`
+      if (!sessionStorage.getItem(loginLogKey)) {
+        sessionStorage.setItem(loginLogKey, '1')
+        supabase.auth.getSession().then(({ data: sData }) => {
+          const token = sData?.session?.access_token
+          if (!token) return
+          fetch('/api/admin/users', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ mode: role }),
+          }).catch(() => {})
+        })
+      }
       const VIEWER_VISIBLE_STATUSES = ['所蔵', '貸出中']
       const isBookVisibleToCurrentUser = (b: any) =>
         role === 'admin' || VIEWER_VISIBLE_STATUSES.includes(String(b?.status || '').trim())
@@ -4502,7 +4518,7 @@ export default function YopacAppPage() {
       async function settings() {
         await ensureWorksLoaded()
         ensureWorkFormats()
-        app.innerHTML = `<div class="page-head"><h1>管理</h1></div><section class="panel"><h2>利用者アカウント管理</h2><p class="muted">ログインできるユーザーのメールアドレス・パスワードを登録、変更、削除できます。</p><form id="add-user-form" class="toolbar" style="margin-top:10px"><input type="email" id="new-user-email" placeholder="メールアドレス" aria-label="新しいユーザーのメールアドレス" required style="flex:1;min-width:200px"><input type="password" id="new-user-password" placeholder="パスワード（6文字以上）" aria-label="新しいユーザーのパスワード" minlength="6" required style="flex:1;min-width:180px"><button type="submit" id="add-user-btn" class="primary">ユーザーを登録</button></form><p id="user-mgmt-status" class="muted" role="status"></p><div id="user-mgmt-list"><div class="search-loading"><span class="spinner" aria-hidden="true"></span><span>ユーザー一覧を読み込み中…</span></div></div></section><div class="cards"><section class="panel"><h2>役割ラベル</h2><div id="role-management"></div><div class="toolbar"><input id="new-role" aria-label="新しい役割"><button type="button" id="add-role">追加</button></div></section><section class="panel"><h2>状態の種類</h2><div id="status-management"></div><div class="toolbar"><input id="new-status" aria-label="新しい状態"><button type="button" id="add-status">追加</button></div></section><section class="panel"><h2>作品の形式</h2><div id="format-management"></div><div class="toolbar"><input id="new-format" aria-label="新しい作品の形式"><button type="button" id="add-format">追加</button></div></section></div><section class="panel"><h2>書影（表紙画像）の一括取込</h2><p class="muted">お手元の書影ZIPファイル（<code>YOPAC_書影_001.zip</code> など複数選択可）または展開済みのJPG画像を選択すると、Supabase Storage（<code>covers</code>バケット）へ一括保存され、全蔵書の書影が表示されます。</p><div class="toolbar"><label class="button primary">書影ZIP / 画像ファイルを選択して取込<input id="cover-batch-input" type="file" accept=".zip,image/*" multiple hidden></label></div><p id="image-import-status" class="muted" role="status"></p></section><section class="panel"><h2>保存した検索</h2>${
+        app.innerHTML = `<div class="page-head"><h1>管理</h1></div><section class="panel"><h2>利用者アカウント管理</h2><p class="muted">ログインできるユーザーのメールアドレス・パスワードを登録、変更、削除できます。</p><form id="add-user-form" class="toolbar" style="margin-top:10px"><input type="email" id="new-user-email" placeholder="メールアドレス" aria-label="新しいユーザーのメールアドレス" required style="flex:1;min-width:200px"><input type="password" id="new-user-password" placeholder="パスワード（6文字以上）" aria-label="新しいユーザーのパスワード" minlength="6" required style="flex:1;min-width:180px"><button type="submit" id="add-user-btn" class="primary">ユーザーを登録</button></form><p id="user-mgmt-status" class="muted" role="status"></p><div id="user-mgmt-list"><div class="search-loading"><span class="spinner" aria-hidden="true"></span><span>ユーザー一覧を読み込み中…</span></div></div><h3 style="margin-top:18px">ログイン履歴</h3><div class="toolbar" style="margin-bottom:8px"><button type="button" id="refresh-login-logs" class="tiny">履歴を更新</button><button type="button" id="clear-login-logs" class="tiny danger">履歴をクリア</button></div><div id="login-logs-list"><p class="muted">読み込み中…</p></div></section><div class="cards"><section class="panel"><h2>役割ラベル</h2><div id="role-management"></div><div class="toolbar"><input id="new-role" aria-label="新しい役割"><button type="button" id="add-role">追加</button></div></section><section class="panel"><h2>状態の種類</h2><div id="status-management"></div><div class="toolbar"><input id="new-status" aria-label="新しい状態"><button type="button" id="add-status">追加</button></div></section><section class="panel"><h2>作品の形式</h2><div id="format-management"></div><div class="toolbar"><input id="new-format" aria-label="新しい作品の形式"><button type="button" id="add-format">追加</button></div></section></div><section class="panel"><h2>書影（表紙画像）の一括取込</h2><p class="muted">お手元の書影ZIPファイル（<code>YOPAC_書影_001.zip</code> など複数選択可）または展開済みのJPG画像を選択すると、Supabase Storage（<code>covers</code>バケット）へ一括保存され、全蔵書の書影が表示されます。</p><div class="toolbar"><label class="button primary">書影ZIP / 画像ファイルを選択して取込<input id="cover-batch-input" type="file" accept=".zip,image/*" multiple hidden></label></div><p id="image-import-status" class="muted" role="status"></p></section><section class="panel"><h2>保存した検索</h2>${
           db.saved
             .map(
               (s: any) =>
@@ -4523,10 +4539,27 @@ export default function YopacAppPage() {
           listEl.innerHTML =
             '<div class="search-loading"><span class="spinner" aria-hidden="true"></span><span>ユーザー一覧を読み込み中…</span></div>'
           try {
-            const { users } = await adminUsersRequest('GET')
+            const { users, loginLogs } = await adminUsersRequest('GET')
             if (statusEl) {
               statusEl.textContent = ''
               statusEl.className = 'muted'
+            }
+            const logsEl = $('#login-logs-list')
+            if (logsEl) {
+              const logs = Array.isArray(loginLogs) ? loginLogs : []
+              logsEl.innerHTML = logs.length
+                ? `<div class="table-wrap" style="max-height:320px;overflow:auto"><table><thead><tr><th>日時</th><th>メールアドレス</th><th>区分</th><th>端末・ブラウザ</th></tr></thead><tbody>${logs
+                    .slice(0, 200)
+                    .map(
+                      (l: any) =>
+                        `<tr><td>${esc(fmt(l.at))}</td><td><strong>${esc(
+                          l.email
+                        )}</strong></td><td><span class="badge">${esc(
+                          l.mode || '利用者'
+                        )}</span></td><td>${esc(l.device || '—')}</td></tr>`
+                    )
+                    .join('')}</tbody></table></div>`
+                : '<p class="muted">ログイン履歴はまだありません。</p>'
             }
             if (!users || !users.length) {
               listEl.innerHTML = '<p class="muted">登録されているユーザーがありません。</p>'
@@ -4605,7 +4638,33 @@ export default function YopacAppPage() {
                     await adminUsersRequest('PATCH', payload)
                     closeModal()
                     notify('ユーザー情報を更新しました')
-                    loadAdminUsers()
+                    const refreshLogsBtn = $('#refresh-login-logs')
+        if (refreshLogsBtn) refreshLogsBtn.onclick = () => loadAdminUsers()
+        const clearLogsBtn = $('#clear-login-logs')
+        if (clearLogsBtn) {
+          clearLogsBtn.onclick = () => {
+            openModal(
+              `<h2>ログイン履歴をクリア</h2>
+              <p>記録されているログイン履歴をすべて削除します。よろしいですか？</p>
+              <div class="toolbar">
+                <button type="button" id="cancel-clear-logs">キャンセル</button>
+                <button type="button" id="confirm-clear-logs" class="danger">履歴をクリア</button>
+              </div>`
+            )
+            $('#cancel-clear-logs', modalBody).onclick = closeModal
+            $('#confirm-clear-logs', modalBody).onclick = async () => {
+              try {
+                await adminUsersRequest('DELETE', { action: 'clearLogs' })
+                closeModal()
+                notify('ログイン履歴をクリアしました')
+                loadAdminUsers()
+              } catch (err: any) {
+                notify(err.message || 'クリアに失敗しました')
+              }
+            }
+          }
+        }
+        loadAdminUsers()
                   } catch (err: any) {
                     if (errEl) errEl.textContent = err.message || '更新に失敗しました'
                     if (saveBtn) {
@@ -5271,6 +5330,11 @@ export default function YopacAppPage() {
         const logoutBtn = document.getElementById('logout-btn')
         if (logoutBtn) {
           logoutBtn.onclick = async () => {
+            try {
+              for (const k of Object.keys(sessionStorage)) {
+                if (k.startsWith('yopac_login_logged_')) sessionStorage.removeItem(k)
+              }
+            } catch {}
             await supabase.auth.signOut()
             router.push('/login')
           }

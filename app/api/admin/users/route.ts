@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
 const ADMIN_EMAIL = 'yiwai223@gmail.com'
+const LOG_BUCKET = 'admin-logs'
+const LOG_PATH = 'login_logs.json'
+const MAX_LOGS = 500
 
 function getAdminClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -17,7 +20,7 @@ function getAdminClient() {
   })
 }
 
-async function verifyAdmin(request: Request) {
+async function verifyUser(request: Request) {
   const adminClient = getAdminClient()
   if (!adminClient) {
     return {
@@ -46,14 +49,76 @@ async function verifyAdmin(request: Request) {
     }
   }
 
-  const email = (data.user.email || '').trim().toLowerCase()
+  return { adminClient, caller: data.user }
+}
+
+async function verifyAdmin(request: Request) {
+  const auth = await verifyUser(request)
+  if ('error' in auth && auth.error) return auth
+  const { adminClient, caller } = auth
+
+  const email = (caller.email || '').trim().toLowerCase()
   if (email !== ADMIN_EMAIL.toLowerCase()) {
     return {
       error: NextResponse.json({ error: '管理者権限が必要です。' }, { status: 403 }),
     }
   }
 
-  return { adminClient, caller: data.user }
+  return { adminClient, caller }
+}
+
+async function ensureLogBucket(adminClient: any) {
+  const { data } = await adminClient.storage.getBucket(LOG_BUCKET)
+  if (!data) {
+    await adminClient.storage.createBucket(LOG_BUCKET, { public: false })
+  }
+}
+
+async function readLoginLogs(adminClient: any): Promise<any[]> {
+  try {
+    const { data, error } = await adminClient.storage.from(LOG_BUCKET).download(LOG_PATH)
+    if (error || !data) return []
+    const text = await data.text()
+    const parsed = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+async function writeLoginLogs(adminClient: any, logs: any[]) {
+  await ensureLogBucket(adminClient)
+  const payload = JSON.stringify(logs.slice(0, MAX_LOGS))
+  await adminClient.storage
+    .from(LOG_BUCKET)
+    .upload(LOG_PATH, new Blob([payload], { type: 'application/json' }), {
+      upsert: true,
+      contentType: 'application/json',
+    })
+}
+
+function summarizeUserAgent(ua: string) {
+  const os = /iPhone/i.test(ua)
+    ? 'iPhone'
+    : /iPad/i.test(ua)
+    ? 'iPad'
+    : /Android/i.test(ua)
+    ? 'Android'
+    : /Windows/i.test(ua)
+    ? 'Windows'
+    : /Macintosh|Mac OS/i.test(ua)
+    ? 'Mac'
+    : 'その他'
+  const browser = /Edg/i.test(ua)
+    ? 'Edge'
+    : /CriOS|Chrome/i.test(ua)
+    ? 'Chrome'
+    : /FxiOS|Firefox/i.test(ua)
+    ? 'Firefox'
+    : /Safari/i.test(ua)
+    ? 'Safari'
+    : ''
+  return browser ? `${os} / ${browser}` : os
 }
 
 export async function GET(request: Request) {
@@ -61,12 +126,19 @@ export async function GET(request: Request) {
   if ('error' in auth && auth.error) return auth.error
   const { adminClient } = auth
 
-  const { data, error } = await adminClient.auth.admin.listUsers({ page: 1, perPage: 200 })
-  if (error) {
-    return NextResponse.json({ error: 'ユーザー一覧の取得に失敗しました：' + error.message }, { status: 500 })
+  const [usersRes, loginLogs] = await Promise.all([
+    adminClient.auth.admin.listUsers({ page: 1, perPage: 200 }),
+    readLoginLogs(adminClient),
+  ])
+
+  if (usersRes.error) {
+    return NextResponse.json(
+      { error: 'ユーザー一覧の取得に失敗しました：' + usersRes.error.message },
+      { status: 500 }
+    )
   }
 
-  const users = (data?.users || [])
+  const users = (usersRes.data?.users || [])
     .map((u) => ({
       id: u.id,
       email: u.email || '',
@@ -79,7 +151,58 @@ export async function GET(request: Request) {
       return a.email.localeCompare(b.email)
     })
 
-  return NextResponse.json({ users })
+  return NextResponse.json({ users, loginLogs })
+}
+
+// ログイン記録の追加（認証済みユーザー本人のみ記録、閲覧は管理者専用）
+export async function PUT(request: Request) {
+  const auth = await verifyUser(request)
+  if ('error' in auth && auth.error) return auth.error
+  const { adminClient, caller } = auth
+
+  let body: { mode?: string } = {}
+  try {
+    body = await request.json()
+  } catch {
+    body = {}
+  }
+
+  const email = caller.email || ''
+  const isAdmin = email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase()
+  const mode = body.mode === 'viewer' || !isAdmin ? '利用者' : '管理者'
+  const ua = request.headers.get('user-agent') || ''
+  const device = summarizeUserAgent(ua)
+  const now = new Date()
+
+  try {
+    const logs = await readLoginLogs(adminClient)
+    const latestSame = logs[0]
+    if (
+      latestSame &&
+      latestSame.userId === caller.id &&
+      latestSame.device === device &&
+      latestSame.mode === mode &&
+      now.getTime() - new Date(latestSame.at).getTime() < 60_000
+    ) {
+      return NextResponse.json({ ok: true, skipped: true })
+    }
+
+    const entry = {
+      id: `${now.getTime()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId: caller.id,
+      email,
+      mode,
+      device,
+      at: now.toISOString(),
+    }
+    await writeLoginLogs(adminClient, [entry, ...logs])
+    return NextResponse.json({ ok: true })
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: 'ログイン記録の保存に失敗しました：' + (err?.message || '') },
+      { status: 500 }
+    )
+  }
 }
 
 export async function POST(request: Request) {
@@ -188,11 +311,16 @@ export async function DELETE(request: Request) {
   if ('error' in auth && auth.error) return auth.error
   const { adminClient, caller } = auth
 
-  let body: { id?: string }
+  let body: { id?: string; action?: string }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: 'リクエスト形式が不正です。' }, { status: 400 })
+  }
+
+  if (body.action === 'clearLogs') {
+    await writeLoginLogs(adminClient, [])
+    return NextResponse.json({ ok: true })
   }
 
   const targetId = String(body.id || '').trim()
